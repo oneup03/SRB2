@@ -349,6 +349,89 @@
 		"gl_FragColor = final_color;\n" \
 	"}\0"
 
+// Composite a TaB-rendered source texture (top half = eye 0, bottom half =
+// eye 1) into a row-interleaved output. For each destination row we sample
+// either the top half or the bottom half of the source based on the row's
+// parity — replaces the previous stencil-buffer-based composite, which
+// was unreliable on some driver/display combinations.
+//
+// gl_FragCoord.y is in screen-space pixels (bottom-up in GL), so the
+// per-row parity matches the framebuffer row index directly. The destination
+// texcoord is mapped: y * 0.5 + 0.5 for the top half (eye 0), y * 0.5 for
+// the bottom half (eye 1).
+#define GLSL_ROW_INTERLACED_COMPOSITE_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	"void main(void) {\n" \
+		"vec2 uv = gl_TexCoord[0].st;\n" \
+		"int row = int(gl_FragCoord.y);\n" \
+		"if ((row - (row / 2) * 2) == 0)\n" \
+			"uv.y = uv.y * 0.5 + 0.5;\n" \
+		"else\n" \
+			"uv.y = uv.y * 0.5;\n" \
+		"gl_FragColor = texture2D(tex, uv);\n" \
+	"}\0"
+
+// Composite an SbS-rendered source texture (left half = eye 0, right half =
+// eye 1) into a column-interleaved output. Per-fragment column-parity picks
+// which half of the source to sample. Even columns → left half (eye 0);
+// odd columns → right half (eye 1).
+#define GLSL_COLUMN_INTERLACED_COMPOSITE_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	"void main(void) {\n" \
+		"vec2 uv = gl_TexCoord[0].st;\n" \
+		"int col = int(gl_FragCoord.x);\n" \
+		"if ((col - (col / 2) * 2) == 0)\n" \
+			"uv.x = uv.x * 0.5;\n" \
+		"else\n" \
+			"uv.x = uv.x * 0.5 + 0.5;\n" \
+		"gl_FragColor = texture2D(tex, uv);\n" \
+	"}\0"
+
+// Composite an SbS-rendered source texture into a checkerboard output for
+// DLP-style checkerboard 3D displays. (col + row) parity picks the source
+// half: even sum → left half (eye 0); odd sum → right half (eye 1).
+#define GLSL_CHECKERBOARD_COMPOSITE_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	"void main(void) {\n" \
+		"vec2 uv = gl_TexCoord[0].st;\n" \
+		"int col = int(gl_FragCoord.x);\n" \
+		"int row = int(gl_FragCoord.y);\n" \
+		"int sum = col + row;\n" \
+		"if ((sum - (sum / 2) * 2) == 0)\n" \
+			"uv.x = uv.x * 0.5;\n" \
+		"else\n" \
+			"uv.x = uv.x * 0.5 + 0.5;\n" \
+		"gl_FragColor = texture2D(tex, uv);\n" \
+	"}\0"
+
+// Composite an SbS-rendered source texture (left half = eye A / left eye,
+// right half = eye B / right eye) into a red/cyan anaglyph using the Dubois
+// optimization. The Dubois 3x6 matrix mixes both eyes' RGB values to
+// minimize ghost-image (cross-talk) for standard red/cyan glasses while
+// preserving more color information than the naive channel-swap.
+//
+// Coefficients from Eric Dubois's optimized red/cyan anaglyph projection
+// (https://www.site.uottawa.ca/~edubois/anaglyph/). Each output channel
+// pulls in contributions from BOTH eyes — the small negative cross-eye
+// terms are the key to suppressing the bleed that makes naive anaglyphs
+// look smeary and color-warped.
+#define GLSL_ANAGLYPH_DUBOIS_COMPOSITE_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	"void main(void) {\n" \
+		"vec2 uv = gl_TexCoord[0].st;\n" \
+		"vec2 uvL = vec2(uv.x * 0.5,        uv.y);\n" \
+		"vec2 uvR = vec2(uv.x * 0.5 + 0.5,  uv.y);\n" \
+		"vec3 cA = texture2D(tex, uvL).rgb;\n" \
+		"vec3 cB = texture2D(tex, uvR).rgb;\n" \
+		"float r = clamp( 0.437*cA.r + 0.449*cA.g + 0.164*cA.b\n" \
+		                "-0.011*cB.r - 0.032*cB.g - 0.007*cB.b, 0.0, 1.0);\n" \
+		"float g = clamp(-0.062*cA.r - 0.062*cA.g - 0.024*cA.b\n" \
+		                "+0.377*cB.r + 0.761*cB.g + 0.009*cB.b, 0.0, 1.0);\n" \
+		"float b = clamp(-0.048*cA.r - 0.050*cA.g - 0.017*cA.b\n" \
+		                "-0.026*cB.r - 0.093*cB.g + 1.234*cB.b, 0.0, 1.0);\n" \
+		"gl_FragColor = vec4(r, g, b, 1.0);\n" \
+	"}\0"
+
 //
 // Generic vertex shader
 //

@@ -1,0 +1,271 @@
+name: Build & rolling release
+
+on:
+  push:
+    branches: [stereo3d]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rolling-release-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    # Only publish the rolling release from the canonical branch. Staging
+    # builds (auto/upstream-rebase) run the build jobs as a CI gate but must
+    # not clobber the published release.
+    if: github.ref_name == 'stereo3d'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Recreate rolling release
+        run: |
+          set -e
+          # Drop any previous rolling release + tag so we can re-point cleanly.
+          gh release delete latest --yes --cleanup-tag 2>/dev/null || true
+
+          cat > /tmp/notes.md <<EOF
+          Automatic build from commit $GITHUB_SHA on \`$GITHUB_REF_NAME\`.
+
+          **Windows** zip bundles the v2.2.15 game assets, freshly built \`srb2win.exe\`, and the LeiaSR runtime DLLs.
+
+          **Linux** AppImage bundles the v2.2.15 game assets and a portable \`lsdlsrb2\` binary. LeiaSR is not included (Windows-only); all other stereo modes (SbS, TaB, Anaglyph, Row/Column-Interlaced, Checkerboard) are available. If FUSE is unavailable, run \`./SRB2-*.AppImage --appimage-extract-and-run\`.
+          EOF
+
+          gh release create latest \
+            --prerelease \
+            --title "Latest stereo3d build" \
+            --target "$GITHUB_SHA" \
+            --notes-file /tmp/notes.md
+
+  build-windows:
+    needs: release
+    # Run even when `release` is skipped (staging-branch CI gate path).
+    if: ${{ always() && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+    runs-on: windows-latest
+
+    env:
+      ASSETS_URL: https://github.com/STJr/SRB2/releases/download/SRB2_release_2.2.15/SRB2-v2215-Full.zip
+      BUILD_OUT: bin\VC10\Win32\Release
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.SUBMODULE_PAT }}
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Setup NASM
+        uses: ilammy/setup-nasm@v1
+
+      - name: Build (Release | Win32)
+        shell: cmd
+        run: msbuild src\sdl\Srb2SDL-vc10.vcxproj /p:Configuration=Release /p:Platform=Win32 /p:SolutionDir=%CD%\ /m /v:minimal /nologo
+
+      - name: Download v2.2.15 assets
+        run: Invoke-WebRequest -Uri "$env:ASSETS_URL" -OutFile assets.zip
+
+      - name: Assemble package
+        id: pkg
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $stage = Join-Path $env:RUNNER_TEMP 'pkg'
+          if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+          Expand-Archive -Path assets.zip -DestinationPath $stage -Force
+
+          # Find the directory that contains srb2win.exe — handles zips that
+          # either dump files at root or nest them inside a versioned folder.
+          $hit = Get-ChildItem -Path $stage -Filter srb2win.exe -Recurse -File |
+                 Select-Object -First 1
+          if (-not $hit) { throw "srb2win.exe not found in upstream package" }
+          $root = $hit.Directory.FullName
+
+          # Overlay our freshly built exe under upstream's lowercase name.
+          $built = Join-Path $env:BUILD_OUT 'Srb2Win.exe'
+          if (-not (Test-Path $built)) { throw "build output missing: $built" }
+          Copy-Item -Force $built -Destination (Join-Path $root 'srb2win.exe')
+
+          # v2215 ships SDL2_mixer_ext.dll; our MSVC build looks for SDL2_mixer.dll.
+          # SDL2_mixer_ext is an API-compatible superset, so re-expose it under
+          # the legacy name.
+          $ext = Join-Path $root 'SDL2_mixer_ext.dll'
+          if (Test-Path $ext) {
+            Copy-Item -Force $ext -Destination (Join-Path $root 'SDL2_mixer.dll')
+          }
+
+          # Drop in the LeiaSR runtime DLLs.
+          Copy-Item -Force 'thirdparty\LeiaSR32\bin\*.dll' -Destination $root
+
+          $short = $env:GITHUB_SHA.Substring(0,7)
+          $zip   = "SRB2-stereo3d-$short-Win32.zip"
+          if (Test-Path $zip) { Remove-Item -Force $zip }
+          Compress-Archive -Path (Join-Path $root '*') -DestinationPath $zip
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload Windows artifact to rolling release
+        if: github.ref_name == 'stereo3d'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+        run: gh release upload latest "$env:ZIP" --clobber
+
+  build-linux:
+    needs: release
+    # Run even when `release` is skipped (staging-branch CI gate path).
+    if: ${{ always() && (needs.release.result == 'success' || needs.release.result == 'skipped') }}
+    # Pin to 22.04 (glibc 2.35) so the AppImage runs on Ubuntu 22.04+ /
+    # Debian 12+ / Fedora 36+ / Steam Deck. Do NOT switch to ubuntu-latest
+    # — that now tracks 24.04 (glibc 2.39) and would lock out older systems.
+    runs-on: ubuntu-22.04
+
+    env:
+      ASSETS_URL: https://github.com/STJr/SRB2/releases/download/SRB2_release_2.2.15/SRB2-v2215-Full.zip
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          token: ${{ secrets.SUBMODULE_PAT }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libsdl2-dev libsdl2-mixer-dev \
+            libpng-dev zlib1g-dev libcurl4-openssl-dev \
+            libopenmpt-dev libgme-dev libminiupnpc-dev \
+            libgl-dev libglu1-mesa-dev \
+            file desktop-file-utils imagemagick
+
+      - name: Configure (CMake)
+        # SRB2_CONFIG_STATIC_STDLIB defaults ON (CMakeLists.txt:65) which forces
+        # -static-libgcc -static-libstdc++ — brittle and pointless once linuxdeploy
+        # bundles libs. ERRORMODE=OFF because GCC 11 hits warnings the MSVC build
+        # never sees. EXE_NAME pins the binary name so AppRun's exec path is
+        # stable across branches (otherwise it'd be lsdlsrb2_stereo3d).
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSRB2_CONFIG_HWRENDER=ON \
+            -DSRB2_CONFIG_STATIC_STDLIB=OFF \
+            -DSRB2_CONFIG_ERRORMODE=OFF \
+            -DSRB2_CONFIG_USE_GME=ON \
+            -DSRB2_SDL2_EXE_NAME=lsdlsrb2
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Verify glibc forward-compat (< 2.36)
+        # Cheap insurance against accidental runner drift to ubuntu-latest.
+        run: |
+          BIN=build/bin/lsdlsrb2
+          if objdump -T "$BIN" | grep -E 'GLIBC_2\.(3[6-9]|[4-9][0-9])' ; then
+            echo "::error::Binary depends on glibc >= 2.36 — runner has drifted past ubuntu-22.04"
+            exit 1
+          fi
+
+      - name: Download v2.2.15 assets
+        run: |
+          curl -fLsS -o assets.zip "$ASSETS_URL"
+          mkdir -p assets-extract
+          unzip -q assets.zip -d assets-extract
+
+      - name: Assemble AppDir
+        run: |
+          set -e
+          APPDIR=SRB2.AppDir
+          rm -rf "$APPDIR"
+          mkdir -p "$APPDIR/usr/bin"
+          mkdir -p "$APPDIR/usr/share/games/srb2"
+          mkdir -p "$APPDIR/usr/share/applications"
+          mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+
+          cp build/bin/lsdlsrb2 "$APPDIR/usr/bin/lsdlsrb2"
+          chmod +x "$APPDIR/usr/bin/lsdlsrb2"
+
+          # Locate the upstream asset folder (the one containing srb2win.exe)
+          # and copy every game data file alongside it. Mirrors the Windows
+          # workflow's strategy so we don't have to hard-code asset names.
+          ASSET_HIT=$(find assets-extract -iname 'srb2win.exe' -type f | head -n1)
+          if [ -z "$ASSET_HIT" ]; then
+            echo "::error::srb2win.exe not found in upstream asset zip"
+            exit 1
+          fi
+          ASSET_DIR=$(dirname "$ASSET_HIT")
+          echo "Asset source dir: $ASSET_DIR"
+          find "$ASSET_DIR" -maxdepth 1 -type f \
+            \( -iname '*.pk3' -o -iname '*.dta' -o -iname 'gamecontrollerdb.txt' \) \
+            -exec cp -f {} "$APPDIR/usr/share/games/srb2/" \;
+          ls -la "$APPDIR/usr/share/games/srb2/"
+
+          cat > "$APPDIR/usr/share/applications/srb2.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=SRB2 (stereo3d)
+          Exec=lsdlsrb2
+          Icon=srb2
+          Categories=Game;ActionGame;
+          EOF
+          cp "$APPDIR/usr/share/applications/srb2.desktop" "$APPDIR/srb2.desktop"
+
+          # Icon: convert the XPM shipped in our source tree. Deterministic and
+          # doesn't depend on upstream zip layout.
+          convert src/sdl/SDL_icon.xpm -resize 256x256 "$APPDIR/srb2.png"
+          cp "$APPDIR/srb2.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/srb2.png"
+
+          # AppRun: cd into the asset directory so SRB2 finds srb2.pk3 in '.'
+          # regardless of where the user launches the AppImage from.
+          cat > "$APPDIR/AppRun" <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/usr/lib:$LD_LIBRARY_PATH"
+          cd "$HERE/usr/share/games/srb2"
+          exec "$HERE/usr/bin/lsdlsrb2" "$@"
+          EOF
+          chmod +x "$APPDIR/AppRun"
+
+      - name: Bundle into AppImage (linuxdeploy)
+        run: |
+          set -e
+          curl -fLsS -o linuxdeploy.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy.AppImage
+          ./linuxdeploy.AppImage --appdir SRB2.AppDir --output appimage
+
+      - name: Sanity-check bundled libs
+        # Confirm critical deps were bundled into the AppDir rather than left
+        # as host references. libGL/libGLX SHOULD remain as host references —
+        # driver/X-server ABI must come from the host.
+        run: ldd SRB2.AppDir/usr/bin/lsdlsrb2 || true
+
+      - name: Rename AppImage
+        id: rename
+        run: |
+          set -e
+          SHORT=$(echo "$GITHUB_SHA" | cut -c1-7)
+          OUT="SRB2-stereo3d-${SHORT}-Linux-x86_64.AppImage"
+          SRC=$(ls -1 *.AppImage | grep -v '^linuxdeploy' | head -n1)
+          mv "$SRC" "$OUT"
+          echo "appimage=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Linux artifact to rolling release
+        if: github.ref_name == 'stereo3d'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APPIMAGE: ${{ steps.rename.outputs.appimage }}
+        run: gh release upload latest "$APPIMAGE" --clobber

@@ -33,6 +33,7 @@
 #include "z_zone.h"
 #include "m_random.h" // quake camera shake
 #include "r_portal.h"
+#include "r_stereo.h"
 #include "r_main.h"
 #include "i_system.h" // I_GetPreciseTime
 #include "r_fps.h" // Frame interpolation/uncapped
@@ -1655,6 +1656,8 @@ void R_RegisterEngineStuff(void)
 	CV_RegisterVar(&cv_renderthings);
 	CV_RegisterVar(&cv_ffloorclip);
 	CV_RegisterVar(&cv_spriteclip);
+
+	R_RegisterStereoVars();
 
 	CV_RegisterVar(&cv_cam_dist);
 	CV_RegisterVar(&cv_cam_still);

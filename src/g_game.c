@@ -27,6 +27,7 @@
 #include "p_local.h"
 #include "r_draw.h"
 #include "r_main.h"
+#include "r_stereo.h" // R_DrawAcrossStereoEyes for the pre-level title card
 #include "s_sound.h"
 #include "g_game.h"
 #include "g_demo.h"
@@ -1960,8 +1961,8 @@ void G_PreLevelTitleCard(void)
 		}
 		lasttime = nowtime;
 
-		ST_runTitleCard();
-		ST_preLevelTitleCardDrawer();
+		ST_runTitleCard(); // mutates state — must run only once per frame
+		R_DrawAcrossStereoEyes(ST_preLevelTitleCardDrawer);
 		I_FinishUpdate(); // page flip or blit buffer
 		NetKeepAlive(); // Prevent timeouts
 

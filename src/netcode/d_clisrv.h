@@ -82,6 +82,10 @@ void D_ClientServerInit(void);
 // Create any new ticcmds and broadcast to other players.
 void NetUpdate(void);
 
+// True while a stereo eye loop is in progress; NetUpdate early-returns so
+// input/network processing can't change game state between eye iterations.
+extern boolean net_stereo_render_in_progress;
+
 // Maintain connections to nodes without timing them all out.
 void NetKeepAlive(void);
 

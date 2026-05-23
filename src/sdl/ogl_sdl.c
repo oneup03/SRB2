@@ -40,8 +40,11 @@
 #include "../hardware/hw_main.h"
 #include "ogl_sdl.h"
 #include "../i_system.h"
+#include "../i_video.h"
 #include "hwsym_sdl.h"
 #include "../m_argv.h"
+#include "../r_stereo.h"
+#include "../r_stereo_leiasr.h"
 
 #ifdef DEBUG_TO_FILE
 #include <stdarg.h>
@@ -185,8 +188,90 @@ void OglSdlFinishUpdate(boolean waitvbl)
 
 	SDL_GetWindowSize(window, &sdlw, &sdlh);
 
-	HWR_MakeScreenFinalTexture();
-	HWR_DrawScreenFinalTexture(sdlw, sdlh);
+	// Decide which present path to take. Shader-composite modes
+	// (Anaglyph-Dubois, Row-Interlaced, Column-Interlaced, Checkerboard)
+	// all share the same recipe — stretch the TaB or SbS internal render
+	// to fill the SDL window, recapture into the LEIA texture, then run a
+	// per-mode fragment-shader composite at display resolution. LeiaSR has
+	// its own SR-weaver-driven path. Everything else just stretches and
+	// presents directly.
+	INT32 composite_shader = -1;
+	if (R_StereoActive())
+	{
+		switch (cv_stereomode.value)
+		{
+			case STEREO_ANAGLYPH:
+				composite_shader = SHADER_ANAGLYPH_DUBOIS_COMPOSITE;
+				break;
+			case STEREO_ROW_INTERLACED:
+				composite_shader = SHADER_ROW_INTERLACED_COMPOSITE;
+				break;
+			case STEREO_COLUMN_INTERLACED:
+				composite_shader = SHADER_COLUMN_INTERLACED_COMPOSITE;
+				break;
+			case STEREO_CHECKERBOARD:
+				composite_shader = SHADER_CHECKERBOARD_COMPOSITE;
+				break;
+			default:
+				break;
+		}
+	}
+
+	if (composite_shader >= 0)
+	{
+		HWR_MakeScreenFinalTexture();
+		HWR_DrawScreenFinalTexture(sdlw, sdlh);
+
+		HWR_MakeScreenLeiaTextureSized(sdlw, sdlh);
+		HWR_DrawStereoComposite(composite_shader, sdlw, sdlh);
+	}
+	// LeiaSR mode: hand the captured backbuffer (SbS-packed by the eye
+	// loop) directly to the SR weaver. The weaver writes into the
+	// currently-bound viewport and does any upscale internally as it
+	// samples the input texture — no separate stretch + recapture pass
+	// is needed (see the leiasr-integration skill, section A.4).
+	//
+	// Three steps:
+	//   1. Capture the backbuffer at exact engine render size into a
+	//      tightly-fitted NPOT LINEAR-filtered texture (LEIA slot).
+	//   2. Set the GL viewport to the SDL window dimensions so the
+	//      weaver's output fills the panel (after the eye loop +
+	//      ResetStereoMode the viewport is still at vid.width ×
+	//      vid.height, which may be smaller than the SDL window).
+	//   3. Weave. The weaver samples LEIA (vid.width × vid.height) and
+	//      writes to (sdlw × sdlh).
+	//
+	// We deliberately do NOT call GClipRect between the viewport set
+	// and the weave — GClipRect's viewport math uses screen_height
+	// (the rendered backbuffer size) and would produce a negative Y
+	// when sdlh > screen_height, clipping the weave output to a
+	// sub-region of the display.
+	//
+	// Falls back to the normal final-texture composite if the LeiaSR
+	// runtime didn't initialize (no Leia hardware/service).
+	else if (R_StereoMode() == STEREO_LEIASR)
+	{
+		R_LeiaSR_Init(I_GetWindowHandle()); // lazy init
+		if (R_LeiaSR_Available())
+		{
+			HWR_MakeScreenLeiaTexture();
+			HWR_SetPresentViewport(sdlw, sdlh);
+			{
+				const UINT32 tex_id = HWR_GetScreenLeiaTextureID();
+				R_LeiaSR_Weave(tex_id, vid.width, vid.height);
+			}
+		}
+		else
+		{
+			HWR_MakeScreenFinalTexture();
+			HWR_DrawScreenFinalTexture(sdlw, sdlh);
+		}
+	}
+	else
+	{
+		HWR_MakeScreenFinalTexture();
+		HWR_DrawScreenFinalTexture(sdlw, sdlh);
+	}
 	SDL_GL_SwapWindow(window);
 
 	GClipRect(0, 0, realwidth, realheight, NZCLIP_PLANE);

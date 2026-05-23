@@ -44,6 +44,10 @@ extern rendermode_t chosenrendermode;
 */
 void I_StartupGraphics(void);
 
+/**	\brief return the platform-native window handle (HWND on Windows, NULL elsewhere)
+*/
+void *I_GetWindowHandle(void);
+
 /**	\brief shutdown video mode
 */
 void I_ShutdownGraphics(void);

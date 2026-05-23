@@ -52,6 +52,7 @@ LOCAL_SRC_FILES :=      am_map.c \
                         r_segs.c \
                         r_sky.c \
                         r_splats.c \
+                        r_stereo.c \
                         r_things.c \
                         s_sound.c \
                         screen.c \

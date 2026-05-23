@@ -1,0 +1,94 @@
+name: Upstream promote
+
+# Fires when the build workflow (release.yml) finishes on the staging branch.
+# If the build succeeded, fast-forward stereo3d to the staging SHA, delete
+# the staging branch, and re-dispatch release.yml on stereo3d so the rolling
+# release picks up the new commits. (Force-push from GITHUB_TOKEN does not
+# trigger the push-on-stereo3d trigger, so explicit dispatch is required.)
+
+on:
+  workflow_run:
+    workflows: [ "Build & rolling release" ]   # must match release.yml's `name:` exactly
+    types: [ completed ]
+    branches: [ "auto/upstream-rebase" ]
+
+permissions:
+  contents: write              # force-push stereo3d, delete staging
+  actions: write               # gh workflow run
+  issues: write                # failure-issue filing
+
+jobs:
+  promote:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Pin to the exact SHA that was built. The staging branch may have
+          # been re-pushed between build completion and promote start.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Force-push staging SHA to stereo3d
+        run: git push --force origin HEAD:refs/heads/stereo3d
+
+      - name: Delete staging branch
+        run: git push origin --delete auto/upstream-rebase || true
+
+      - name: Re-dispatch build workflow on stereo3d
+        # Force-push above used GITHUB_TOKEN and therefore did not fire the
+        # `push: branches: [stereo3d]` trigger in release.yml. Re-dispatch so
+        # the rolling release publishes from the canonical branch.
+        #
+        # GITHUB_TOKEN is fine here: nothing currently listens for the
+        # post-promotion release.yml run via `workflow_run`. If you ever add
+        # such a listener (e.g. a smoke-test workflow on stereo3d), switch
+        # this dispatch to SUBMODULE_PAT — a run dispatched by GITHUB_TOKEN
+        # does not fire `workflow_run` cascades.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run release.yml --ref stereo3d
+
+  notify-failure:
+    if: github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: File build-failure issue
+        # No checkout in this job — every gh call must pass --repo explicitly.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          LABEL_ARG=()
+          if gh label list --repo "$REPO" --search upstream-sync --json name --jq '.[].name' | grep -qx upstream-sync \
+             || gh label create upstream-sync --repo "$REPO" \
+                  --description "Automated upstream sync" --color ededed; then
+            LABEL_ARG=(--label upstream-sync)
+          fi
+
+          {
+            echo "Build for the rebased staging branch finished with conclusion: \`$CONCLUSION\`."
+            echo "- SHA: \`$HEAD_SHA\`"
+            echo "- Run: $RUN_URL"
+            echo
+            echo "Staging branch \`auto/upstream-rebase\` left in place for inspection."
+            echo "Investigate locally with:"
+            echo
+            echo '```'
+            echo "git fetch origin auto/upstream-rebase"
+            echo "git checkout auto/upstream-rebase"
+            echo '```'
+          } > issue-body.md
+
+          gh issue create --repo "$REPO" \
+            --title "Upstream rebase build failed" \
+            --body-file issue-body.md \
+            "${LABEL_ARG[@]}"

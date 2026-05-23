@@ -1549,6 +1549,11 @@ void NetKeepAlive(void)
 	FileSendTicker();
 }
 
+// Set to true around the stereo eye loop. Currently unused as a NetUpdate
+// blocker — disabled because suspecting it's the cause of the click crash.
+// Kept as a hook in case we need it back.
+boolean net_stereo_render_in_progress = false;
+
 void NetUpdate(void)
 {
 	static tic_t resptime = 0;

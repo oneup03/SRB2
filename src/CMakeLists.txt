@@ -67,6 +67,8 @@ add_executable(SRB2SDL2 MACOSX_BUNDLE WIN32
 	r_skins.c
 	r_sky.c
 	r_splats.c
+	r_stereo.c
+	r_stereo_leiasr.cpp
 	r_things.c
 	r_bbox.c
 	r_textures.c
@@ -345,8 +347,15 @@ target_compile_options(SRB2SDL2 PRIVATE
 		/Wv:19.20.27004.0
 	>
 
-	# C++, GNU, Clang and Apple Clang
-	$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<OR:$<C_COMPILER_ID:GNU>,$<C_COMPILER_ID:AppleClang>,$<C_COMPILER_ID:Clang>>>:
+	# C++, GNU
+	$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<C_COMPILER_ID:GNU>>:
+		-Wall
+		-Wextra
+		-Wno-trigraphs
+	>
+
+	# C++, Clang and Apple Clang
+	$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<OR:$<C_COMPILER_ID:AppleClang>,$<C_COMPILER_ID:Clang>>>:
 		-Wall
 		-Wextra
 		-Wno-trigraphs

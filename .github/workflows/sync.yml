@@ -1,0 +1,125 @@
+name: Upstream sync
+
+# Rebase `stereo3d` onto `upstream/master` (STJr/SRB2) on a schedule, push
+# the result to a staging branch, then dispatch the build workflow as a CI
+# gate. promote.yml fast-forwards stereo3d to the staging tip only if the
+# build succeeds.
+
+on:
+  schedule:
+    - cron: '0 7 * * 1'        # Mondays 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write              # push staging branch
+  actions: write               # gh workflow run
+  issues: write                # file/comment conflict issues
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: stereo3d
+          fetch-depth: 0       # rebase needs full ancestry
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/STJr/SRB2.git
+          git fetch upstream master
+
+      - id: check
+        name: Skip if already up-to-date
+        run: |
+          if git merge-base --is-ancestor upstream/master HEAD; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: rebase
+        name: Rebase onto upstream/master
+        if: steps.check.outputs.needed == 'true'
+        run: |
+          if git rebase upstream/master; then
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+          else
+            # Capture conflicts BEFORE abort; --abort clears the unmerged state.
+            CONFLICTS="$(git diff --name-only --diff-filter=U || true)"
+            git rebase --abort || true
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            {
+              echo "files<<CONFLICT_EOF"
+              echo "$CONFLICTS"
+              echo "CONFLICT_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push staging branch
+        if: steps.rebase.outputs.result == 'clean'
+        run: git push --force origin HEAD:refs/heads/auto/upstream-rebase
+
+      - name: Dispatch build workflow on staging
+        # Two compounding rules here:
+        #   1. GITHUB_TOKEN pushes don't fire `push` events, so we can't rely
+        #      on the staging push to trigger release.yml — explicit dispatch
+        #      is required.
+        #   2. A run *dispatched by GITHUB_TOKEN* is itself flagged as
+        #      GITHUB_TOKEN-triggered, and its completion does NOT fire
+        #      `workflow_run` cascades. That would silently break promote.yml.
+        # Fix: dispatch with a PAT. SUBMODULE_PAT is already provisioned for
+        # release.yml's submodule checkouts; it needs Actions: Read and write
+        # on this repo for the dispatch to succeed.
+        if: steps.rebase.outputs.result == 'clean'
+        env:
+          GH_TOKEN: ${{ secrets.SUBMODULE_PAT }}
+        run: gh workflow run release.yml --ref auto/upstream-rebase
+
+      - name: File / comment conflict issue
+        if: steps.rebase.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CONFLICT_FILES: ${{ steps.rebase.outputs.files }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Make the label optional: if create fails (permissions, etc.) we
+          # still want the issue to land, just without the label. Do NOT pass
+          # --label unless the label is confirmed to exist.
+          LABEL_ARG=()
+          if gh label list --repo "$REPO" --search upstream-sync --json name --jq '.[].name' | grep -qx upstream-sync \
+             || gh label create upstream-sync --repo "$REPO" \
+                  --description "Automated upstream sync" --color ededed; then
+            LABEL_ARG=(--label upstream-sync)
+          fi
+
+          {
+            echo "Upstream rebase failed — conflicting paths:"
+            echo
+            echo '```'
+            echo "$CONFLICT_FILES"
+            echo '```'
+            echo
+            echo "Run: $RUN_URL"
+          } > issue-body.md
+
+          EXISTING=$(gh issue list --repo "$REPO" --state open \
+            --search "Upstream rebase blocked by conflicts in:title" \
+            --json number --jq '.[0].number // empty')
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$REPO" --body-file issue-body.md
+          else
+            gh issue create --repo "$REPO" \
+              --title "Upstream rebase blocked by conflicts" \
+              --body-file issue-body.md \
+              "${LABEL_ARG[@]}"
+          fi
+
+          exit 1   # surface the failure in the Actions tab / cron emails

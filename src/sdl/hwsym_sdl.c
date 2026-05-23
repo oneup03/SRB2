@@ -101,6 +101,7 @@ void *hwSym(const char *funcName,void *handle)
 	GETFUNC(DrawScreenTexture);
 	GETFUNC(MakeScreenTexture);
 	GETFUNC(DrawScreenFinalTexture);
+	GETFUNC(DrawScreenFinalTextureAt);
 
 	GETFUNC(InitShaders);
 	GETFUNC(LoadShader);
@@ -115,6 +116,15 @@ void *hwSym(const char *funcName,void *handle)
 	GETFUNC(UpdateLightTable);
 	GETFUNC(ClearLightTables);
 	GETFUNC(SetScreenPalette);
+
+	GETFUNC(GetScreenTextureID);
+	GETFUNC(MakeScreenTextureExact);
+	GETFUNC(MakeScreenTextureSized);
+	GETFUNC(SetStereoMode);
+	GETFUNC(ReapplyStereoMode);
+	GETFUNC(ResetStereoMode);
+	GETFUNC(DrawInterlacedComposite);
+	GETFUNC(SetPresentViewport);
 
 #else //HWRENDER
 	if (0 == strcmp("FinishUpdate", funcName))

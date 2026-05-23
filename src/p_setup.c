@@ -36,6 +36,7 @@
 #include "r_sky.h"
 #include "r_draw.h"
 #include "r_fps.h" // R_ResetViewInterpolation in level load
+#include "r_stereo.h" // R_DrawAcrossStereoEyes for the loading screen
 
 #include "s_sound.h"
 #include "st_stuff.h"
@@ -7857,7 +7858,7 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 	P_SetTarget(&ticcmd_ztargetfocus[0], NULL);
 	P_SetTarget(&ticcmd_ztargetfocus[1], NULL);
 
-	CON_Drawer(); // let the user know what we are going to do
+	R_DrawAcrossStereoEyes(CON_Drawer); // let the user know what we are going to do
 	I_FinishUpdate(); // page flip or blit buffer
 
 	// Reset the palette

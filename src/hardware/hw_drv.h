@@ -56,7 +56,15 @@ EXPORT void HWRAPI(FlushScreenTextures) (void);
 EXPORT void HWRAPI(DoScreenWipe) (int wipeStart, int wipeEnd, FSurfaceInfo *surf, FBITFIELD polyFlags);
 EXPORT void HWRAPI(DrawScreenTexture) (int tex, FSurfaceInfo *surf, FBITFIELD polyflags);
 EXPORT void HWRAPI(MakeScreenTexture) (int tex);
-EXPORT void HWRAPI(DrawScreenFinalTexture) (int tex, int width, int height);
+// stretch=true fills the (width, height) viewport without aspect
+// preservation. Used by stereo present paths (full-SbS displays presenting
+// as 3840×1080, LeiaSR weaver input, interlaced composite source) where
+// black bars would break the stereo signal pipeline. stretch=false aspect-
+// preserves the rendered backbuffer inside the viewport — used for mono
+// rendering so the early-startup BASE 320x200 loading window doesn't get
+// stretched across the full desktop.
+EXPORT void HWRAPI(DrawScreenFinalTexture) (int tex, int width, int height, boolean stretch);
+EXPORT void HWRAPI(DrawScreenFinalTextureAt) (int tex, int x, int y, int width, int height);
 
 #define SCREENVERTS 10
 EXPORT void HWRAPI(PostImgRedraw) (float points[SCREENVERTS][SCREENVERTS][2]);
@@ -74,6 +82,51 @@ EXPORT UINT32 HWRAPI(CreateLightTable)(RGBA_t *hw_lighttable);
 EXPORT void HWRAPI(UpdateLightTable)(UINT32 id, RGBA_t *hw_lighttable);
 EXPORT void HWRAPI(ClearLightTables)(void);
 EXPORT void HWRAPI(SetScreenPalette)(RGBA_t *palette);
+
+// Returns the OpenGL texture ID of an engine "screen texture" slot. Used by
+// the LeiaSR weaver bridge to hand the SbS capture to the SR runtime.
+EXPORT UINT32 HWRAPI(GetScreenTextureID)(int tex);
+
+// Variant of MakeScreenTexture that allocates a tightly-fitted NPOT texture
+// of screen_width × screen_height pixels. Required for consumers (LeiaSR)
+// that sample [0,1] across the texture and would otherwise see padding.
+EXPORT void HWRAPI(MakeScreenTextureExact)(int tex);
+// Variant of MakeScreenTextureExact that captures at caller-supplied
+// dimensions (re-creating the texture if dimensions change between calls).
+// Used by the LeiaSR present path so the SR weaver receives an input
+// texture sized to the SDL window when the engine renders at a smaller
+// internal resolution.
+EXPORT void HWRAPI(MakeScreenTextureSized)(int tex, INT32 width, INT32 height);
+
+// Stereoscopic 3D mode setup. mode is the stereomode_t enum from r_stereo.h,
+// eye is -1 (left) / +1 (right). The (x, y, w, h) rect is the EXACT viewport
+// region the eye+player render should occupy — d_main.c computes this via
+// R_StereoComputePlayerEyeRect so callers only need to pass it through.
+// SetStereoMode applies viewport+scissor to the rect; Anaglyph (Dubois),
+// Row/Column-Interlaced and Checkerboard all render SbS/TaB internally and
+// composite at present time via a fragment shader (see ogl_sdl.c), so this
+// entrypoint no longer touches the color mask or stencil per-eye.
+EXPORT void HWRAPI(SetStereoMode)(INT32 mode, INT32 eye,
+                                  INT32 x, INT32 y, INT32 w, INT32 h);
+// Re-applies the cached SetStereoMode state. HWR_ClearView calls this
+// after GClipRect overwrites the viewport so subsequent geometry stays
+// inside the per-eye region without needing to recompute the rect.
+EXPORT void HWRAPI(ReapplyStereoMode)(void);
+// Restores full viewport and color mask to mono defaults.
+EXPORT void HWRAPI(ResetStereoMode)(void);
+// Composite a TaB/SbS-rendered source texture into a stereo display format
+// using the currently-bound composite fragment shader (set by the caller
+// via HWR_DrawStereoComposite). Caller has captured the source texture at
+// (width, height) — typically after a stretch step.
+EXPORT void HWRAPI(DrawInterlacedComposite)(int tex, INT32 width, INT32 height);
+// Set the GL viewport to (0, 0, width, height). Used by the LeiaSR present
+// path to give the SR weaver the full-SDL-window viewport as its output
+// region before calling weave() — the weaver writes into the currently
+// bound viewport, and after the eye loop / ResetStereoMode the viewport
+// is still at the engine's render size (which may be smaller than the
+// SDL window). Without this, the weaver only fills screen_width ×
+// screen_height pixels of the panel.
+EXPORT void HWRAPI(SetPresentViewport)(INT32 width, INT32 height);
 
 // ==========================================================================
 //                                      HWR DRIVER OBJECT, FOR CLIENT PROGRAM
@@ -115,6 +168,7 @@ struct hwdriver_s
 	DrawScreenTexture   pfnDrawScreenTexture;
 	MakeScreenTexture   pfnMakeScreenTexture;
 	DrawScreenFinalTexture  pfnDrawScreenFinalTexture;
+	DrawScreenFinalTextureAt pfnDrawScreenFinalTextureAt;
 
 	InitShaders         pfnInitShaders;
 	LoadShader          pfnLoadShader;
@@ -129,6 +183,15 @@ struct hwdriver_s
 	UpdateLightTable    pfnUpdateLightTable;
 	ClearLightTables    pfnClearLightTables;
 	SetScreenPalette    pfnSetScreenPalette;
+
+	GetScreenTextureID  pfnGetScreenTextureID;
+	MakeScreenTextureExact pfnMakeScreenTextureExact;
+	MakeScreenTextureSized pfnMakeScreenTextureSized;
+	SetStereoMode       pfnSetStereoMode;
+	ReapplyStereoMode   pfnReapplyStereoMode;
+	ResetStereoMode     pfnResetStereoMode;
+	DrawInterlacedComposite pfnDrawInterlacedComposite;
+	SetPresentViewport  pfnSetPresentViewport;
 };
 
 extern struct hwdriver_s hwdriver;

@@ -483,6 +483,12 @@
     <ClInclude Include="..\r_state.h">
       <Filter>R_Rend</Filter>
     </ClInclude>
+    <ClInclude Include="..\r_stereo.h">
+      <Filter>R_Rend</Filter>
+    </ClInclude>
+    <ClInclude Include="..\r_stereo_leiasr.h">
+      <Filter>R_Rend</Filter>
+    </ClInclude>
     <ClInclude Include="..\r_things.h">
       <Filter>R_Rend</Filter>
     </ClInclude>
@@ -1006,6 +1012,12 @@
     <ClCompile Include="..\r_splats.c">
       <Filter>R_Rend</Filter>
     </ClCompile>
+    <ClCompile Include="..\r_stereo.c">
+      <Filter>R_Rend</Filter>
+    </ClCompile>
+    <ClCompile Include="..\r_stereo_leiasr.cpp">
+      <Filter>R_Rend</Filter>
+    </ClCompile>
     <ClCompile Include="..\r_things.c">
       <Filter>R_Rend</Filter>
     </ClCompile>
@@ -1046,6 +1058,9 @@
       <Filter>SDLApp</Filter>
     </ClCompile>
     <ClCompile Include="i_system.c">
+      <Filter>SDLApp</Filter>
+    </ClCompile>
+    <ClCompile Include="i_threads.c">
       <Filter>SDLApp</Filter>
     </ClCompile>
     <ClCompile Include="i_ttf.c">

@@ -91,7 +91,7 @@
 #endif
 
 // maximum number of windowed modes (see windowedModes[][])
-#define MAXWINMODES (21)
+#define MAXWINMODES (17)
 
 /**	\brief
 */
@@ -157,6 +157,10 @@ static const char *fallback_resolution_name = "Fallback";
 // windowed video modes from which to choose from.
 static INT32 windowedModes[MAXWINMODES][2] =
 {
+	{3840,2160}, // 1.78,4K UHD       — needed for 1080p row-interlaced stereo output
+	{2560,1600}, // 1.60
+	{2560,1440}, // 1.78,QHD          — needed for 720p row-interlaced stereo output
+	{1920,1440}, // 1.33,4:3 high-res
 	{1920,1200}, // 1.60,6.00
 	{1920,1080}, // 1.66
 	{1680,1050}, // 1.60,5.25
@@ -170,14 +174,6 @@ static INT32 windowedModes[MAXWINMODES][2] =
 	{1280, 960}, // 1.33,4.00
 	{1280, 800}, // 1.60,4.00
 	{1280, 720}, // 1.66
-	{1152, 864}, // 1.33,3.60
-	{1024, 768}, // 1.33,3.20
-	{ 960, 600}, // 1.60,3.00
-	{ 800, 600}, // 1.33,2.50
-	{ 640, 480}, // 1.33,2.00
-	{ 640, 400}, // 1.60,2.00
-	{ 320, 240}, // 1.33,1.00
-	{ 320, 200}, // 1.60,1.00
 };
 
 static void Impl_VideoSetupSDLBuffer(void);
@@ -203,15 +199,25 @@ static void SDLSetMode(INT32 width, INT32 height, SDL_bool fullscreen, SDL_bool 
 	{
 		if (fullscreen)
 		{
+			// Manual borderless fullscreen — see Impl_CreateWindow for why
+			// we avoid SDL_WINDOW_FULLSCREEN_DESKTOP on Windows.
+			SDL_DisplayMode dm;
+			const int displayIdx = SDL_GetWindowDisplayIndex(window);
 			wasfullscreen = SDL_TRUE;
-			SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+			if (SDL_GetCurrentDisplayMode(displayIdx >= 0 ? displayIdx : 0, &dm) == 0)
+			{
+				SDL_SetWindowBordered(window, SDL_FALSE);
+				SDL_SetWindowResizable(window, SDL_FALSE);
+				SDL_SetWindowSize(window, dm.w, dm.h);
+				SDL_SetWindowPosition(window, 0, 0);
+			}
 		}
 		else // windowed mode
 		{
 			if (wasfullscreen)
 			{
 				wasfullscreen = SDL_FALSE;
-				SDL_SetWindowFullscreen(window, 0);
+				SDL_SetWindowBordered(window, SDL_TRUE);
 			}
 			// Reposition window only in windowed mode
 			SDL_SetWindowSize(window, width, height);
@@ -228,11 +234,8 @@ static void SDLSetMode(INT32 width, INT32 height, SDL_bool fullscreen, SDL_bool 
 	{
 		Impl_CreateWindow(fullscreen);
 		wasfullscreen = fullscreen;
-		SDL_SetWindowSize(window, width, height);
-		if (fullscreen)
-		{
-			SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
-		}
+		if (!fullscreen) // CreateWindow handles fullscreen sizing itself
+			SDL_SetWindowSize(window, width, height);
 	}
 
 #ifdef HWRENDER
@@ -1659,11 +1662,25 @@ static SDL_bool Impl_CreateWindow(SDL_bool fullscreen)
 	if (window != NULL)
 		return SDL_FALSE;
 
-	if (fullscreen)
-		flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+	// Always sync realwidth/realheight to the current vid.width/vid.height
+	// before creating the SDL window. Without this, when the renderer is
+	// switched (software → OpenGL) right after config.cfg is loaded, this
+	// path still sees the BASE 320x200 from the initial startup window and
+	// asks SDL for a 320x200 window. With FULLSCREEN_DESKTOP that races
+	// with the desktop-sizing in a way that ends up over-scaled on first
+	// paint until something (alt-tab, focus loss) re-evaluates the window.
+	realwidth = (Uint16)vid.width;
+	realheight = (Uint16)vid.height;
 
 	if (borderlesswindow)
 		flags |= SDL_WINDOW_BORDERLESS;
+
+	// Tell SDL we want true physical-pixel coordinates. Combined with the
+	// DPI-aware manifest, this prevents SDL from inflating the window by the
+	// Windows display-scaling factor — without this flag, on a system with
+	// 150% Windows scaling SDL_SetWindowFullscreen creates a window 1.5×
+	// the desktop dimensions, extending the game far off-screen.
+	flags |= SDL_WINDOW_ALLOW_HIGHDPI;
 
 #ifdef HWRENDER
 	if (vid.glstate == VID_GL_LIBRARY_LOADED)
@@ -1675,7 +1692,12 @@ static SDL_bool Impl_CreateWindow(SDL_bool fullscreen)
 	SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
 #endif
 
-	// Create a window
+	// Create the window WINDOWED first, then transition to fullscreen via
+	// SDL_SetWindowFullscreen. Creating directly with FULLSCREEN_DESKTOP can
+	// race against the desktop-sizing on Windows: the window ends up "stuck"
+	// at the initial CreateWindow size for the first few frames, with the
+	// desktop transition only completing on the next focus-change event.
+	// Two-step creation avoids the race entirely.
 	window = SDL_CreateWindow("SRB2 "VERSIONSTRING, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
 			realwidth, realheight, flags);
 
@@ -1684,6 +1706,26 @@ static SDL_bool Impl_CreateWindow(SDL_bool fullscreen)
 	{
 		CONS_Printf(M_GetText("Couldn't create window: %s\n"), SDL_GetError());
 		return SDL_FALSE;
+	}
+
+	if (fullscreen)
+	{
+		// Manual borderless fullscreen instead of SDL_WINDOW_FULLSCREEN_DESKTOP.
+		// On Windows with the DPI-aware manifest and >100% display scaling,
+		// SDL2's FULLSCREEN_DESKTOP code path inflates the window by the DPI
+		// factor (e.g. 5760x3240 on a 3840x2160 desktop at 150% scaling),
+		// pushing the window far off-screen. Setting borderless + sizing to
+		// the current display mode + positioning at 0,0 avoids that path
+		// while giving the same visual result (window covers full desktop).
+		SDL_DisplayMode dm;
+		const int displayIdx = SDL_GetWindowDisplayIndex(window);
+		if (SDL_GetCurrentDisplayMode(displayIdx >= 0 ? displayIdx : 0, &dm) == 0)
+		{
+			SDL_SetWindowBordered(window, SDL_FALSE);
+			SDL_SetWindowResizable(window, SDL_FALSE);
+			SDL_SetWindowSize(window, dm.w, dm.h);
+			SDL_SetWindowPosition(window, 0, 0);
+		}
 	}
 
 	Impl_SetWindowIcon();
@@ -1748,6 +1790,25 @@ static void Impl_VideoSetupBuffer(void)
 	{
 		I_Error("%s", M_GetText("Not enough memory for video buffer\n"));
 	}
+}
+
+// Returns the platform-native window handle (HWND on Windows). Used by
+// LeiaSR integration to attach the weaver to the same window the GL context
+// is rendering into. NULL if the window doesn't exist or isn't on a platform
+// with a meaningful native handle.
+void *I_GetWindowHandle(void)
+{
+	if (!window)
+		return NULL;
+#ifdef _WIN32
+	{
+		SDL_SysWMinfo info;
+		SDL_VERSION(&info.version);
+		if (SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_WINDOWS)
+			return (void *)info.info.win.window;
+	}
+#endif
+	return NULL;
 }
 
 void I_StartupGraphics(void)
@@ -1931,6 +1992,7 @@ void VID_StartupOpenGL(void)
 		HWD.pfnDrawScreenTexture= hwSym("DrawScreenTexture",NULL);
 		HWD.pfnMakeScreenTexture= hwSym("MakeScreenTexture",NULL);
 		HWD.pfnDrawScreenFinalTexture=hwSym("DrawScreenFinalTexture",NULL);
+		HWD.pfnDrawScreenFinalTextureAt=hwSym("DrawScreenFinalTextureAt",NULL);
 
 		HWD.pfnInitShaders      = hwSym("InitShaders",NULL);
 		HWD.pfnLoadShader       = hwSym("LoadShader",NULL);
@@ -1945,6 +2007,15 @@ void VID_StartupOpenGL(void)
 		HWD.pfnUpdateLightTable = hwSym("UpdateLightTable",NULL);
 		HWD.pfnClearLightTables = hwSym("ClearLightTables",NULL);
 		HWD.pfnSetScreenPalette = hwSym("SetScreenPalette",NULL);
+
+		HWD.pfnGetScreenTextureID = hwSym("GetScreenTextureID",NULL);
+		HWD.pfnMakeScreenTextureExact = hwSym("MakeScreenTextureExact",NULL);
+		HWD.pfnMakeScreenTextureSized = hwSym("MakeScreenTextureSized",NULL);
+		HWD.pfnSetStereoMode     = hwSym("SetStereoMode",NULL);
+		HWD.pfnReapplyStereoMode = hwSym("ReapplyStereoMode",NULL);
+		HWD.pfnResetStereoMode   = hwSym("ResetStereoMode",NULL);
+		HWD.pfnDrawInterlacedComposite = hwSym("DrawInterlacedComposite",NULL);
+		HWD.pfnSetPresentViewport = hwSym("SetPresentViewport",NULL);
 
 		vid.glstate = HWD.pfnInit() ? VID_GL_LIBRARY_LOADED : VID_GL_LIBRARY_ERROR; // let load the OpenGL library
 

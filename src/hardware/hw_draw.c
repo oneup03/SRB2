@@ -23,6 +23,7 @@
 
 #include "../m_misc.h" //FIL_WriteFile()
 #include "../r_main.h"
+#include "../r_stereo.h" // R_GetStereoHUDShift / R_GetStereoCrosshairShift
 #include "../w_wad.h"
 #include "../z_zone.h"
 #include "../v_video.h"
@@ -57,6 +58,19 @@ typedef struct
 static UINT8 softwaretranstogl[11]    = {  0, 25, 51, 76,102,127,153,178,204,229,255};
 static UINT8 softwaretranstogl_hi[11] = {  0, 51,102,153,204,255,255,255,255,255,255};
 static UINT8 softwaretranstogl_lo[11] = {  0, 12, 24, 36, 48, 60, 71, 83, 95,111,127};
+
+// Stereoscopic HUD parallax: returns the NDC x-shift for the chrome HUD
+// during the current eye pass. Zero when stereo is off, mono, or
+// cv_stereohuddepth is 0 (the default = HUD at screen depth). This is
+// applied right after each draw function converts its pixel-space cx into
+// NDC ([-1, +1]); see HWR_DrawStretchyFixedPatch for the canonical use.
+static FUNCINLINE float HWR_StereoHUDShiftNDC(void)
+{
+	const INT32 px = R_GetStereoHUDShift();
+	if (px == 0 || vid.width == 0)
+		return 0.0f;
+	return (2.0f * (float)px) / (float)vid.width;
+}
 
 void HWR_DrawStretchyFixedPatch(patch_t *gpatch, fixed_t x, fixed_t y, fixed_t pscale, fixed_t vscale, INT32 option, const UINT8 *colormap)
 {
@@ -262,6 +276,8 @@ void HWR_DrawStretchyFixedPatch(patch_t *gpatch, fixed_t x, fixed_t y, fixed_t p
 	// fwidth and fheight are similar
 	fwidth /= vid.width / 2;
 	fheight /= vid.height / 2;
+
+	cx += HWR_StereoHUDShiftNDC();
 
 	// set the polygon vertices to the right positions
 	v[0].x = v[3].x = cx;
@@ -481,6 +497,8 @@ void HWR_DrawCroppedPatch(patch_t *gpatch, fixed_t x, fixed_t y, fixed_t pscale,
 	fwidth /= vid.width / 2;
 	fheight /= vid.height / 2;
 
+	cx += HWR_StereoHUDShiftNDC();
+
 	// set the polygon vertices to the right positions
 	v[0].x = v[3].x = cx;
 	v[2].x = v[1].x = cx + fwidth;
@@ -683,7 +701,15 @@ void HWR_FadeScreenMenuBack(UINT16 color, UINT8 strength)
 		}
 		else // COLORMAP fade
 		{
-			if (HWR_ShouldUsePaletteRendering())
+			// Skip the palette colormap-fade path while stereo is active:
+			// it captures the current backbuffer into a screen texture and
+			// re-draws it as a fullscreen quad. With a per-eye viewport
+			// active, that fullscreen quad gets squashed into the eye's
+			// half of the screen, producing visible "inner copies" of the
+			// menu/title at smaller-and-dimmer scale. The simple
+			// translucent-quad path below dims correctly within the eye
+			// viewport without re-sampling the framebuffer.
+			if (HWR_ShouldUsePaletteRendering() && !R_StereoActive())
 			{
 				const hwdscreentexture_t scr_tex = HWD_SCREENTEXTURE_GENERIC2;
 
@@ -859,6 +885,8 @@ void HWR_DrawFadeFill(INT32 x, INT32 y, INT32 w, INT32 h, INT32 color, UINT16 ac
 	fy = 1 - fy / (vid.height / 2);
 	fw = fw / (vid.width / 2);
 	fh = fh / (vid.height / 2);
+
+	fx += HWR_StereoHUDShiftNDC();
 
 	v[0].x = v[3].x = fx;
 	v[2].x = v[1].x = fx + fw;
@@ -1116,6 +1144,8 @@ void HWR_DrawConsoleFill(INT32 x, INT32 y, INT32 w, INT32 h, INT32 color, UINT32
 	fw = fw / (vid.width / 2);
 	fh = fh / (vid.height / 2);
 
+	fx += HWR_StereoHUDShiftNDC();
+
 	v[0].x = v[3].x = fx;
 	v[2].x = v[1].x = fx + fw;
 	v[0].y = v[1].y = fy;
@@ -1293,6 +1323,8 @@ void HWR_DrawFill(INT32 x, INT32 y, INT32 w, INT32 h, INT32 color)
 	fy = 1 - fy / (vid.height / 2);
 	fw = fw / (vid.width / 2);
 	fh = fh / (vid.height / 2);
+
+	fx += HWR_StereoHUDShiftNDC();
 
 	v[0].x = v[3].x = fx;
 	v[2].x = v[1].x = fx + fw;

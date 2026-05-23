@@ -117,6 +117,14 @@ typedef struct
 	boolean     mirror;          // SRB2Kart: Encore Mode
 	boolean     shearing;        // 14042019
 	float       viewaiming;      // 17052019
+	// Stereoscopic 3D state. eyeOffset is -1/0/+1 (left/mono/right).
+	// When eyeOffset != 0 the renderer builds an off-axis frustum using
+	// iod (signed eye separation) and focalLength (convergence plane).
+	// skyboxPass collapses the focal plane to push sky to "infinity" disparity.
+	SINT8       eyeOffset;
+	float       iod;
+	float       focalLength;
+	boolean     skyboxPass;
 } FTransform;
 
 // Transformed vector, as passed to HWR API
@@ -146,6 +154,10 @@ enum
 	SHADER_PALETTE_POSTPROCESS,
 	SHADER_UI_COLORMAP_FADE,
 	SHADER_UI_TINTED_WIPE,
+	SHADER_ROW_INTERLACED_COMPOSITE,
+	SHADER_COLUMN_INTERLACED_COMPOSITE,
+	SHADER_CHECKERBOARD_COMPOSITE,
+	SHADER_ANAGLYPH_DUBOIS_COMPOSITE,
 
 	NUMSHADERTARGETS
 };
@@ -332,6 +344,7 @@ enum hwdscreentexture
 	HWD_SCREENTEXTURE_GENERIC1,   // underwater/heat effect, intermission background
 	HWD_SCREENTEXTURE_GENERIC2,   // palette-based colormap fade, screen before palette rendering's postprocessing
 	HWD_SCREENTEXTURE_GENERIC3,   // screen after palette rendering's postprocessing
+	HWD_SCREENTEXTURE_LEIA,       // tightly-fitted (NPOT) capture for the LeiaSR weaver input
 	NUMSCREENTEXTURES,            // (generic3 is unused if palette rendering is disabled)
 };
 

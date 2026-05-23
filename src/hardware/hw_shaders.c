@@ -54,6 +54,18 @@ static struct {
 	// UI tinted wipe shader
 	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_UI_TINTED_WIPE_FRAGMENT_SHADER},
 
+	// Row-interlaced composite (TaB source → row-interleaved output)
+	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_ROW_INTERLACED_COMPOSITE_FRAGMENT_SHADER},
+
+	// Column-interlaced composite (SbS source → column-interleaved output)
+	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_COLUMN_INTERLACED_COMPOSITE_FRAGMENT_SHADER},
+
+	// Checkerboard composite (SbS source → checkerboard 3D output)
+	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_CHECKERBOARD_COMPOSITE_FRAGMENT_SHADER},
+
+	// Anaglyph Dubois composite (SbS source → optimized red/cyan anaglyph)
+	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_ANAGLYPH_DUBOIS_COMPOSITE_FRAGMENT_SHADER},
+
 	{NULL, NULL},
 };
 

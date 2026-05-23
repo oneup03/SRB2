@@ -56,9 +56,52 @@ void HWR_DoPostProcessor(player_t *player);
 void HWR_StartScreenWipe(void);
 void HWR_EndScreenWipe(void);
 void HWR_DrawIntermissionBG(void);
+// Captures the current framebuffer into HWD_SCREENTEXTURE_GENERIC1 — the
+// "screen snapshot" slot sampled by HWR_DrawIntermissionBG and the
+// underwater/heat wave. d_main.c calls this once after the stereo eye loop
+// completes so the snapshot contains BOTH eyes' fully-painted halves; the
+// per-player capture inside HWR_DoPostProcessor otherwise fires before each
+// eye's HUD pass and would leave the snapshot's right half missing the HUD
+// (visible as "intermission BG asymmetric, lives/rings only show in one eye").
+void HWR_MakeScreenTexture(void);
 void HWR_DoWipe(UINT8 wipenum, UINT8 scrnnum);
 void HWR_MakeScreenFinalTexture(void);
 void HWR_DrawScreenFinalTexture(int width, int height);
+// Like HWR_DrawScreenFinalTexture but draws into the (x,y,width,height)
+// sub-rect of the window without clearing — used to duplicate a captured
+// mono backbuffer into per-eye SbS / TaB halves.
+void HWR_DrawScreenFinalTextureAt(int x, int y, int width, int height);
+// Returns the GL texture ID for the slot used by HWR_MakeScreenFinalTexture
+// (GENERIC2 or GENERIC3 depending on palette-rendering state). Callers that
+// can't reach HWD directly (e.g. ogl_sdl.c, which sets _CREATE_DLL_) use
+// this to find the captured backbuffer for downstream effects like the
+// LeiaSR weaver.
+UINT32 HWR_GetScreenFinalTextureID(void);
+// Tightly-fitted (NPOT) screen capture into HWD_SCREENTEXTURE_LEIA, used by
+// the LeiaSR bridge as input to the weaver.
+void   HWR_MakeScreenLeiaTexture(void);
+// Capture the framebuffer at exact (width, height) into LEIA tex. Used when
+// the rendered backbuffer is smaller than the SDL window — caller stretches
+// the rendered content to fill first, then captures the stretched output.
+void   HWR_MakeScreenLeiaTextureSized(INT32 width, INT32 height);
+UINT32 HWR_GetScreenLeiaTextureID(void);
+
+// Set the GL viewport to (0, 0, width, height). Used by the LeiaSR present
+// path right before R_LeiaSR_Weave so the weaver writes to the full SDL
+// window instead of the engine's render rectangle (which may be smaller).
+void   HWR_SetPresentViewport(INT32 width, INT32 height);
+// Thin pass-throughs for the stereo-mode driver hooks, so callers that can't
+// reach HWD directly (anything that includes r_opengl.h, which sets
+// _CREATE_DLL_) can still drive per-eye state.
+void HWR_SetStereoMode(INT32 mode, INT32 eye, INT32 x, INT32 y, INT32 w, INT32 h);
+void HWR_ResetStereoMode(void);
+// Composite the captured LEIA texture into a stereo display format via a
+// fragment shader. shader_target selects the composite kind:
+//   SHADER_ROW_INTERLACED_COMPOSITE     — TaB source → row-interleaved
+//   SHADER_COLUMN_INTERLACED_COMPOSITE  — SbS source → column-interleaved
+//   SHADER_CHECKERBOARD_COMPOSITE       — SbS source → checkerboard
+//   SHADER_ANAGLYPH_DUBOIS_COMPOSITE    — SbS source → red/cyan Dubois anaglyph
+void HWR_DrawStereoComposite(INT32 shader_target, INT32 width, INT32 height);
 
 // This stuff is put here so models can use them
 boolean HWR_UseShader(void);

@@ -165,8 +165,8 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <MinimalRebuild>false</MinimalRebuild>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <PreprocessorDefinitions>HAVE_CURL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\..\libs\curl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_CURL;HAVE_LEIASR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\libs\curl\include;..\..\thirdparty\LeiaSR32\include;..\..\thirdparty\LeiaSR32\third_party\OpenCV\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <CustomBuild>
       <Command />
@@ -178,8 +178,19 @@
       <Outputs />
     </CustomBuild>
     <Link>
-      <AdditionalDependencies>libcurl.dll.a;libz32.a;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>libcurl.dll.a;libz32.a;simulatedreality32.lib;SimulatedRealityCore32.lib;SimulatedRealityOpenGL32.lib;DimencoWeaving32.lib;opencv_world343.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;..\..\thirdparty\LeiaSR32\lib;..\..\thirdparty\LeiaSR32\third_party\OpenCV\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- LeiaSR DLLs (and their direct OpenCV dep) are delay-loaded so the
+           game can launch on machines that don't have the LeiaSR runtime /
+           Leia hardware installed. Only the DLLs we actually import symbols
+           from are listed here — simulatedreality32.dll and DimencoWeaving32.dll
+           are umbrella .libs that forward to Core/OpenGL at link time, so
+           the exe has no direct imports from them (LNK4199 otherwise).
+           Transitive deps (realsense2, libserialport32, vcruntime, etc.)
+           load via the loader chain when these three load, and our runtime
+           probe in r_stereo_leiasr.cpp catches the failure if any are
+           missing. -->
+      <DelayLoadDLLs>SimulatedRealityCore32.dll;SimulatedRealityOpenGL32.dll;opencv_world343.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -190,8 +201,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <DisableSpecificWarnings>4244;4267;4146;4003</DisableSpecificWarnings>
-      <PreprocessorDefinitions>HAVE_CURL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\..\libs\curl\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_CURL;HAVE_LEIASR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\libs\curl\include;..\..\thirdparty\LeiaSR32\include;..\..\thirdparty\LeiaSR32\third_party\OpenCV\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <CustomBuild>
@@ -204,8 +215,19 @@
       <Outputs />
     </CustomBuild>
     <Link>
-      <AdditionalDependencies>libcurl.dll.a;libz32.a;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>libcurl.dll.a;libz32.a;simulatedreality32.lib;SimulatedRealityCore32.lib;SimulatedRealityOpenGL32.lib;DimencoWeaving32.lib;opencv_world343.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;..\..\thirdparty\LeiaSR32\lib;..\..\thirdparty\LeiaSR32\third_party\OpenCV\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <!-- LeiaSR DLLs (and their direct OpenCV dep) are delay-loaded so the
+           game can launch on machines that don't have the LeiaSR runtime /
+           Leia hardware installed. Only the DLLs we actually import symbols
+           from are listed here — simulatedreality32.dll and DimencoWeaving32.dll
+           are umbrella .libs that forward to Core/OpenGL at link time, so
+           the exe has no direct imports from them (LNK4199 otherwise).
+           Transitive deps (realsense2, libserialport32, vcruntime, etc.)
+           load via the loader chain when these three load, and our runtime
+           probe in r_stereo_leiasr.cpp catches the failure if any are
+           missing. -->
+      <DelayLoadDLLs>SimulatedRealityCore32.dll;SimulatedRealityOpenGL32.dll;opencv_world343.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -400,6 +422,8 @@
     <ClInclude Include="..\r_sky.h" />
     <ClInclude Include="..\r_splats.h" />
     <ClInclude Include="..\r_state.h" />
+    <ClInclude Include="..\r_stereo.h" />
+    <ClInclude Include="..\r_stereo_leiasr.h" />
     <ClInclude Include="..\r_textures.h" />
     <ClInclude Include="..\r_things.h" />
     <ClInclude Include="..\r_translation.h" />
@@ -591,6 +615,10 @@
     <ClCompile Include="..\r_skins.c" />
     <ClCompile Include="..\r_sky.c" />
     <ClCompile Include="..\r_splats.c" />
+    <ClCompile Include="..\r_stereo.c" />
+    <ClCompile Include="..\r_stereo_leiasr.cpp">
+      <CompileAs>CompileAsCpp</CompileAs>
+    </ClCompile>
     <ClCompile Include="..\r_textures.c" />
     <ClCompile Include="..\r_things.c" />
     <ClCompile Include="..\r_translation.c" />
@@ -628,6 +656,7 @@
     <ClCompile Include="i_main.c" />
     <ClCompile Include="i_net.c" />
     <ClCompile Include="i_system.c" />
+    <ClCompile Include="i_threads.c" />
     <ClCompile Include="i_ttf.c" />
     <ClCompile Include="i_video.c" />
     <ClCompile Include="mixer_sound.c" />
@@ -637,6 +666,9 @@
   </ItemGroup>
   <ItemGroup>
     <Image Include="Srb2SDL.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <Manifest Include="..\win32\srb2win.exe.manifest" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

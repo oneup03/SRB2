@@ -42,6 +42,7 @@
 #include "../f_finale.h"
 #include "../r_things.h" // R_GetShadowZ
 #include "../r_translation.h"
+#include "../r_stereo.h"
 #include "../d_main.h"
 #include "../p_slopes.h"
 
@@ -5142,6 +5143,12 @@ static void HWR_DrawSkyBackground(player_t *player)
 		dometransform.y      = 0.0;
 		dometransform.z      = 0.0;
 
+		// Force the sky to render at "infinity" depth in stereo: collapsing
+		// the convergence plane via skyboxPass makes parallax = full IPD for
+		// any sky distance, so the sky appears at maximum depth and doesn't
+		// fight the user's IPD/focal settings.
+		dometransform.skyboxPass = true;
+
 		//04/01/2000: Hurdler: added for T&L
 		//                     It should replace all other gl_viewxxx when finished
 		HWR_SetTransformAiming(&dometransform, player, false);
@@ -5261,6 +5268,15 @@ static inline void HWR_ClearView(void)
 	                 ZCLIP_PLANE);
 	HWD.pfnClearBuffer(false, true, 0);
 
+	// GClipRect overwrote the per-eye viewport with the player's view
+	// rect. The depth clear above ran with the scissor still set by the
+	// most recent SetStereoMode call (in d_main.c, before this player's
+	// HWR_RenderPlayerView ran), so depth was correctly cleared inside
+	// the eye-region scissor. Now restore the cached eye-region viewport
+	// for the geometry render that follows.
+	if (R_StereoActive())
+		HWD.pfnReapplyStereoMode();
+
 	//disable clip window - set to full size
 	// rem by Hurdler
 	// HWD.pfnGClipRect(0, 0, vid.width, vid.height);
@@ -5364,6 +5380,11 @@ static void HWR_SetupView(player_t *player, INT32 viewnumber, float fpov, boolea
 	atransform.scaley = (float)vid.width/vid.height;
 	atransform.scalez = 1;
 
+	// No stereo aspect compensation: SbS/TaB are meant to be unsquished by
+	// the stereo display device, so the GPU should produce the natural
+	// half-viewport squish. Each eye keeps the original full FoV; the
+	// display restores aspect.
+
 	atransform.fovxangle = fpov; // Tails
 	atransform.fovyangle = fpov; // Tails
 	if (player->viewrollangle != 0)
@@ -5375,6 +5396,11 @@ static void HWR_SetupView(player_t *player, INT32 viewnumber, float fpov, boolea
 		atransform.rollz = 0.0f;
 	}
 	atransform.splitscreen = splitscreen;
+
+	atransform.eyeOffset   = R_GetCurrentEye();
+	atransform.iod         = R_GetStereoIOD();
+	atransform.focalLength = R_GetStereoFocal();
+	atransform.skyboxPass  = skybox;
 
 	gl_fovlud = (float)(1.0l/tan((double)(fpov*M_PIl/360l)));
 }
@@ -5490,8 +5516,17 @@ void HWR_RenderPlayerView(INT32 viewnumber, player_t *player)
 	if (cv_glshaders.value)
 		HWD.pfnSetShaderInfo(HWD_SHADERINFO_LEVELTIME, (INT32)leveltime); // The water surface shader needs the leveltime.
 
-	if (viewnumber == 0) // Only do it if it's the first screen being rendered
-		HWD.pfnClearBuffer(true, false, &ClearColor); // Clear the Color Buffer, stops HOMs. Also seems to fix the skybox issue on Intel GPUs.
+	// Clear the color buffer once per frame to stop HOMs. Also seems to
+	// fix a skybox issue on Intel GPUs.
+	//
+	// Stereo: skipped here because the eye-region scissor active during
+	// each pass would gate this clear to the wrong rect — for example, on
+	// pass 1 (right eye) the scissor covers the right half (SbS) or
+	// bottom half visually (TaB) of the screen, and the clear would wipe
+	// pass 0's left/top content. d_main.c does a single unscissored
+	// full-screen clear before the eye loop instead.
+	if (viewnumber == 0 && !R_StereoActive())
+		HWD.pfnClearBuffer(true, false, &ClearColor);
 
 	PS_START_TIMING(ps_hw_skyboxtime);
 	if (skybox && drawsky) // If there's a skybox and we should be drawing the sky, draw the skybox
@@ -6000,8 +6035,23 @@ void HWR_DoPostProcessor(player_t *player)
 	if(gamestate != GS_INTERMISSION)
 		HWD.pfnMakeScreenTexture(HWD_SCREENTEXTURE_GENERIC1);
 
-	if (splitscreen) // Not supported in splitscreen - someone want to add support?
-		return;
+	// Per-region behavior for the underwater / heat-haze wave:
+	//   PostImgRedraw queries the current GL viewport and derives its UV
+	//   remap from it. The viewport at this point is whatever the most
+	//   recent render setup left it at — the player's region for mono
+	//   splitscreen, the eye sub-rect of the player's region for stereo
+	//   (with or without splitscreen), or the full screen for mono single-
+	//   player. So a single PostImgRedraw call cleanly handles all of:
+	//     - mono single-player: viewport = full screen
+	//     - mono splitscreen P1 / P2: viewport = top/bottom half
+	//     - SbS / TaB / Anaglyph / Row / Column / Checkerboard / LeiaSR
+	//       (single or splitscreen): viewport = the per-eye-per-player rect
+	//       set by SetStereoMode
+	//   The wave geometry (z=4.4f, ±4.5f clip-space) fills the viewport
+	//   through the current projection; the UV is sampled from the matching
+	//   slice of the captured GENERIC1 texture; the captured texture covers
+	//   the whole framebuffer, so each player/eye combination ends up
+	//   waving its own region without bleed.
 
 	// Drunken vision! WooOOooo~
 	if (*type == postimg_water || *type == postimg_heat)
@@ -6062,6 +6112,11 @@ void HWR_EndScreenWipe(void)
 void HWR_DrawIntermissionBG(void)
 {
 	HWD.pfnDrawScreenTexture(HWD_SCREENTEXTURE_GENERIC1, NULL, 0);
+}
+
+void HWR_MakeScreenTexture(void)
+{
+	HWD.pfnMakeScreenTexture(HWD_SCREENTEXTURE_GENERIC1);
 }
 
 //
@@ -6139,7 +6194,74 @@ void HWR_MakeScreenFinalTexture(void)
 void HWR_DrawScreenFinalTexture(int width, int height)
 {
 	int tex = HWR_ShouldUsePaletteRendering() ? HWD_SCREENTEXTURE_GENERIC3 : HWD_SCREENTEXTURE_GENERIC2;
-	HWD.pfnDrawScreenFinalTexture(tex, width, height);
+	// Stretch to fill the window when stereo is active — full-SbS / LeiaSR /
+	// interlaced composite paths all need a black-bar-free fill. Mono
+	// rendering keeps aspect preservation so a small render (e.g. the
+	// early-startup BASE 320x200 loading window) doesn't get stretched
+	// across the full desktop.
+	HWD.pfnDrawScreenFinalTexture(tex, width, height, R_StereoActive());
+}
+
+void HWR_DrawScreenFinalTextureAt(int x, int y, int width, int height)
+{
+	const int tex = HWR_ShouldUsePaletteRendering() ? HWD_SCREENTEXTURE_GENERIC3 : HWD_SCREENTEXTURE_GENERIC2;
+	HWD.pfnDrawScreenFinalTextureAt(tex, x, y, width, height);
+}
+
+UINT32 HWR_GetScreenFinalTextureID(void)
+{
+	const int tex = HWR_ShouldUsePaletteRendering() ? HWD_SCREENTEXTURE_GENERIC3 : HWD_SCREENTEXTURE_GENERIC2;
+	return HWD.pfnGetScreenTextureID(tex);
+}
+
+void HWR_MakeScreenLeiaTexture(void)
+{
+	HWD.pfnMakeScreenTextureExact(HWD_SCREENTEXTURE_LEIA);
+}
+
+// Capture the framebuffer at exact (width, height) into the LEIA texture
+// slot. Used when the rendered backbuffer is smaller than the SDL window
+// (e.g. a 1920×1080 render presented on a 3840×2160 SR display): the
+// caller stretches the rendered content to fill the SDL window first
+// (HWR_DrawScreenFinalTexture with stretch), then calls this to capture
+// the stretched output at the SDL window size for the SR weaver input.
+void HWR_MakeScreenLeiaTextureSized(INT32 width, INT32 height)
+{
+	HWD.pfnMakeScreenTextureSized(HWD_SCREENTEXTURE_LEIA, width, height);
+}
+
+UINT32 HWR_GetScreenLeiaTextureID(void)
+{
+	return HWD.pfnGetScreenTextureID(HWD_SCREENTEXTURE_LEIA);
+}
+
+void HWR_SetPresentViewport(INT32 width, INT32 height)
+{
+	HWD.pfnSetPresentViewport(width, height);
+}
+
+// Composite the captured LEIA texture into one of the stereo display
+// formats handled by a fragment shader (row-interleaved from TaB source,
+// column-interleaved / checkerboard / Dubois anaglyph from SbS source).
+// The eye loop renders TaB or SbS internally (via R_StereoMode's
+// substitution), the caller stretches and recaptures into the LEIA tex,
+// and this function picks the per-fragment composite shader appropriate
+// to the user's display mode.
+void HWR_DrawStereoComposite(INT32 shader_target, INT32 width, INT32 height)
+{
+	HWD.pfnSetShader(HWR_GetShaderFromTarget(shader_target));
+	HWD.pfnDrawInterlacedComposite(HWD_SCREENTEXTURE_LEIA, width, height);
+	HWD.pfnUnSetShader();
+}
+
+void HWR_SetStereoMode(INT32 mode, INT32 eye, INT32 x, INT32 y, INT32 w, INT32 h)
+{
+	HWD.pfnSetStereoMode(mode, eye, x, y, w, h);
+}
+
+void HWR_ResetStereoMode(void)
+{
+	HWD.pfnResetStereoMode();
 }
 
 #endif // HWRENDER

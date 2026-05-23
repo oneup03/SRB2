@@ -18,6 +18,7 @@
 
 #include "r_state.h" // fadecolormap
 #include "r_draw.h" // transtable
+#include "r_stereo.h" // R_DrawAcrossStereoEyes for stereo title-card overlay
 #include "p_pspr.h" // tr_transxxx
 #include "p_local.h"
 #include "st_stuff.h"
@@ -195,8 +196,8 @@ void F_WipeStageTitle(void)
 	&& (wipestyle == WIPESTYLE_COLORMAP)
 	&& G_IsTitleCardAvailable())
 	{
-		ST_runTitleCard();
-		ST_drawWipeTitleCard();
+		ST_runTitleCard(); // mutates state — must run only once per frame
+		R_DrawAcrossStereoEyes(ST_drawWipeTitleCard);
 	}
 }
 

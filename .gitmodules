@@ -1,0 +1,3 @@
+[submodule "thirdparty/LeiaSR32"]
+	path = thirdparty/LeiaSR32
+	url = https://github.com/oneup03/LeiaSR32.git

@@ -86,7 +86,10 @@
 
 #ifdef HWRENDER
 #include "hardware/hw_main.h" // 3D View Rendering
+#include "hardware/hw_drv.h"  // HWD.pfnSetStereoMode for stereo render passes
 #endif
+
+#include "r_stereo.h"
 
 #ifdef _WINDOWS
 #include "win32/win_main.h" // I_DoStartupMouse
@@ -297,6 +300,18 @@ gamestate_t wipegamestate = GS_LEVEL;
 INT16 wipetypepre = -1;
 INT16 wipetypepost = -1;
 
+// Drawer pair fed to R_DrawAcrossStereoEyes for the WipeStageTitle path
+// below — wraps the title-card render plus the levelfadecol overlay so
+// both end up in each eye's viewport before F_WipeStartScreen captures
+// the backbuffer as the wipe's start frame. Without this the captured
+// frame is mono and the wipe-in transition flashes a flat title card
+// across both eye halves.
+static void DrawTitleCardWithLevelFade(void)
+{
+	ST_preLevelTitleCardDrawer();
+	V_DrawFill(0, 0, BASEVIDWIDTH, BASEVIDHEIGHT, levelfadecol);
+}
+
 static void D_Display(void)
 {
 	boolean forcerefresh = false;
@@ -391,6 +406,84 @@ static void D_Display(void)
 	}
 	else
 		wipetypepre = -1;
+
+	// === Stereo: set up before the eye loop so per-frame state mutations
+	// (interpolators, crosshair raycast, stencil pattern) only happen once
+	// regardless of how many eye passes we make. The eye loop wraps the
+	// entire drawing pipeline below — gamestate switch, level render, HUD,
+	// menu, console — so menus/intros/cutscenes/text-prompts all show in 3D.
+	const boolean stereo_active = R_StereoActive();
+	const int num_eye_passes = R_StereoNumEyes();
+	int eye_pass;
+
+	// Cache the player pointers used by the eye loop. HWR_RenderPlayerView
+	// internally calls NetUpdate(), which can process queued input events
+	// and change `displayplayer` mid-frame (e.g. a match-spectator click
+	// switching the view to another player). With the eye loop running
+	// HWR_RenderPlayerView twice per frame, an inter-iteration displayplayer
+	// flip caused inconsistent state and a hard crash. Snapshotting the
+	// pointers up front keeps both eyes pointed at the same player_t for the
+	// whole frame.
+	player_t *const cached_dp  = &players[displayplayer];
+	player_t *const cached_sdp = &players[secondarydisplayplayer];
+
+	R_UpdateStereoCrosshairTrace(cached_dp);
+
+#ifdef HWRENDER
+	// Interlaced (single-player or splitscreen) now renders TaB internally
+	// and composites at SDL window size in ogl_sdl.c, where the stencil
+	// pattern is built at display resolution. No render-time stencil setup
+	// needed here.
+
+	// Apply level interpolators once before the eye loop. They mutate mobj
+	// state for rendering and would double-apply if called per-eye.
+	const boolean apply_interp = (gamestate == GS_LEVEL || (gamestate == GS_TITLESCREEN && titlemapinaction && curbghide && (!hidetitlemap)))
+		&& !automapactive && !dedicated && cv_renderview.value
+		&& (cached_dp->mo || cached_dp->playerstate == PST_DEAD);
+	if (apply_interp)
+		R_ApplyLevelInterpolators(R_UsingFrameInterpolation() ? rendertimefrac : FRACUNIT);
+#endif
+
+	// Block NetUpdate (called inside HWR_RenderPlayerView) for the duration
+	// of the eye loop so it can't process input/network events that would
+	// change displayplayer/mobj state between eye iterations.
+	if (stereo_active)
+		net_stereo_render_in_progress = true;
+
+#ifdef HWRENDER
+	// Stereo: do the once-per-frame color clear here, before the eye loop,
+	// with no scissor active. The per-eye-pass clear inside
+	// HWR_RenderPlayerView is gated by the eye-region scissor and would
+	// only wipe one eye's region per call — so on subsequent passes it'd
+	// leave stale content from the previous frame in any region not
+	// covered by the current eye's scissor (every eye-region except the
+	// current pass's), which manifests as black bands or stale frames
+	// in splitscreen+TaB / splitscreen+Interlaced.
+	if (stereo_active && rendermode == render_opengl)
+	{
+		FRGBAFloat ClearColor = {0.0f, 0.0f, 0.0f, 1.0f};
+		HWD.pfnResetStereoMode(); // ensure no scissor / color mask / stencil gates the clear
+		HWD.pfnClearBuffer(true, false, &ClearColor);
+	}
+#endif
+
+	for (eye_pass = 0; eye_pass < num_eye_passes; eye_pass++)
+	{
+#ifdef HWRENDER
+		const SINT8 eye = R_StereoEyeForPass(eye_pass);
+		if (stereo_active)
+		{
+			// Set up the eye for full-screen drawing first — gamestate
+			// switch overlays (title screen, intro, intermission BG, etc.)
+			// span both player halves in stereo, so we use the "force
+			// single-player" rect (eye half of full screen). Per-player
+			// rects are applied below right before each HWR_RenderPlayerView.
+			INT32 rx, ry, rw, rh;
+			R_StereoComputePlayerEyeRect(R_StereoMode(), eye, -1, &rx, &ry, &rw, &rh);
+			HWD.pfnSetStereoMode((INT32)R_StereoMode(), eye, rx, ry, rw, rh);
+			R_BeginStereoEye(eye);
+		}
+#endif
 
 	// do buffered drawing
 	switch (gamestate)
@@ -487,40 +580,87 @@ static void D_Display(void)
 
 			if (!automapactive && !dedicated && cv_renderview.value)
 			{
-				R_ApplyLevelInterpolators(R_UsingFrameInterpolation() ? rendertimefrac : FRACUNIT);
 				PS_START_TIMING(ps_rendercalltime);
-				if (players[displayplayer].mo || players[displayplayer].playerstate == PST_DEAD)
+
+				if (cached_dp->mo || cached_dp->playerstate == PST_DEAD)
 				{
 					topleft = screens[0] + viewwindowy*vid.width + viewwindowx;
 					objectsdrawn = 0;
-	#ifdef HWRENDER
+#ifdef HWRENDER
 					if (rendermode != render_soft)
-						HWR_RenderPlayerView(0, &players[displayplayer]);
+					{
+						// Apply this player's per-eye viewport directly so
+						// HWR_ClearView's ReapplyStereoMode picks it up after
+						// GClipRect overwrites the viewport. The rect math
+						// for SbS/TaB+splitscreen lives in
+						// R_StereoComputePlayerEyeRect — splitscreen as inner
+						// axis under the eye-outer split.
+						if (stereo_active)
+						{
+							INT32 rx, ry, rw, rh;
+							R_StereoComputePlayerEyeRect(R_StereoMode(), R_GetCurrentPlacementEye(),
+								0, &rx, &ry, &rw, &rh);
+							HWD.pfnSetStereoMode((INT32)R_StereoMode(), R_GetCurrentPlacementEye(),
+								rx, ry, rw, rh);
+						}
+						HWR_RenderPlayerView(0, cached_dp);
+					}
 					else
-	#endif
+#endif
 					if (rendermode != render_none)
-						R_RenderPlayerView(&players[displayplayer]);
+						R_RenderPlayerView(cached_dp);
 				}
 
-				// render the second screen
-				if (splitscreen && players[secondarydisplayplayer].mo)
+				// Splitscreen player 2 — also runs in stereo. Per-player
+				// SetStereoMode call here puts the eye viewport in P2's
+				// region (computed via R_StereoComputePlayerEyeRect with
+				// player_idx=1), so HWR_ClearView's ReapplyStereoMode
+				// later restores the same rect after GClipRect.
+				if (splitscreen && cached_sdp->mo)
 				{
 					viewwindowy = vid.height / 2;
 
 #ifdef HWRENDER
 					if (rendermode == render_opengl)
-						HWR_RenderPlayerView(1, &players[secondarydisplayplayer]);
+					{
+						if (stereo_active)
+						{
+							INT32 rx, ry, rw, rh;
+							R_StereoComputePlayerEyeRect(R_StereoMode(), R_GetCurrentPlacementEye(),
+								1, &rx, &ry, &rw, &rh);
+							HWD.pfnSetStereoMode((INT32)R_StereoMode(), R_GetCurrentPlacementEye(),
+								rx, ry, rw, rh);
+						}
+						HWR_RenderPlayerView(1, cached_sdp);
+					}
 					else
 #endif
 					if (rendermode != render_none)
 					{
 						topleft = screens[0] + viewwindowy*vid.width + viewwindowx;
 
-						R_RenderPlayerView(&players[secondarydisplayplayer]);
+						R_RenderPlayerView(cached_sdp);
 					}
 
 					viewwindowy = 0;
 				}
+
+#ifdef HWRENDER
+				// After all player renders complete, restore the eye-half
+				// of the full screen for the HUD pass (player_idx=-1 →
+				// no splitscreen subdivision). V_PERPLAYER routing in
+				// V_Draw* positions each player's HUD elements within
+				// their half via base coords on top of the full-eye
+				// viewport.
+				if (stereo_active)
+				{
+					INT32 rx, ry, rw, rh;
+					R_StereoComputePlayerEyeRect(R_StereoMode(), R_GetCurrentPlacementEye(),
+						-1, &rx, &ry, &rw, &rh);
+					HWD.pfnSetStereoMode((INT32)R_StereoMode(), R_GetCurrentPlacementEye(),
+						rx, ry, rw, rh);
+				}
+#endif
 
 				// Image postprocessing effect
 				if (rendermode == render_soft)
@@ -534,7 +674,6 @@ static void D_Display(void)
 						V_DoPostProcessor(1, postimgtype2, postimgparam2);
 				}
 				PS_STOP_TIMING(ps_rendercalltime);
-				R_RestoreLevelInterpolators();
 			}
 
 			if (lastdraw)
@@ -601,6 +740,50 @@ static void D_Display(void)
 
 	PS_STOP_TIMING(ps_uitime);
 
+#ifdef HWRENDER
+		if (stereo_active)
+			R_EndStereoEye();
+#endif
+	} // end of eye_pass for-loop
+
+	if (stereo_active)
+		net_stereo_render_in_progress = false;
+
+	// Mark whether the backbuffer holds stereo content this frame so the
+	// present path (HWR_DrawScreenFinalTexture) knows to fill the window
+	// without aspect bars (stereo signal pipelines need a black-bar-free
+	// fill). Mono frames keep aspect preservation so a small render isn't
+	// stretched across the desktop — important for the early-startup
+	// loading window before the eye loop has actually rendered anything.
+	R_SetBackbufferIsStereo(stereo_active);
+
+#ifdef HWRENDER
+	if (stereo_active)
+	{
+		HWD.pfnResetStereoMode();
+
+		// Refresh the intermission/wave snapshot now that BOTH eye passes are
+		// done. HWR_DoPostProcessor captures HWD_SCREENTEXTURE_GENERIC1 once
+		// per player render — i.e. mid-eye-loop, before each eye's HUD pass.
+		// In stereo that means the right eye's HUD (status bar incl. lives /
+		// rings counter, fade, win/lose patches) hasn't been painted into
+		// the backbuffer yet at capture time, so the snapshot ends the frame
+		// asymmetric: left half = world + HUD, right half = world only. The
+		// intermission BG (HWR_DrawIntermissionBG) then samples that
+		// snapshot per-eye and shows the HUD only in the left eye. One
+		// extra capture here — after both eye passes including their HUD
+		// draws — overwrites the asymmetric snapshot with a symmetric one.
+		// Gated on !GS_INTERMISSION to match HWR_DoPostProcessor's gate
+		// (we don't want to capture the intermission itself as the next
+		// frame's backdrop).
+		if (gamestate != GS_INTERMISSION)
+			HWR_MakeScreenTexture();
+	}
+	if (apply_interp)
+		R_RestoreLevelInterpolators();
+#endif
+
+
 	//
 	// wipe update
 	//
@@ -622,8 +805,7 @@ static void D_Display(void)
 			{
 				lt_ticker--;
 				lt_lasttic = lt_ticker;
-				ST_preLevelTitleCardDrawer();
-				V_DrawFill(0, 0, BASEVIDWIDTH, BASEVIDHEIGHT, levelfadecol);
+				R_DrawAcrossStereoEyes(DrawTitleCardWithLevelFade);
 				F_WipeStartScreen();
 			}
 

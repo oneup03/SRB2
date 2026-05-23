@@ -24,6 +24,7 @@
 #include "console.h"
 #include "r_fps.h"
 #include "r_local.h"
+#include "r_stereo.h"
 #include "hu_stuff.h"
 #include "g_game.h"
 #include "g_input.h"
@@ -329,7 +330,9 @@ static void M_VideoOptions(INT32 choice);
 menu_t OP_VideoOptionsDef, OP_VideoModeDef, OP_ColorOptionsDef;
 #ifdef HWRENDER
 static void M_OpenGLOptionsMenu(void);
+static void M_Stereoscopic3DMenu(void);
 menu_t OP_OpenGLOptionsDef;
+menu_t OP_Stereoscopic3DDef;
 #ifdef ALAM_LIGHTING
 menu_t OP_OpenGLLightingDef;
 #endif // ALAM_LIGHTING
@@ -1346,7 +1349,8 @@ static menuitem_t OP_VideoOptionsMenu[] =
 #ifdef HWRENDER
 	{IT_HEADER, NULL, "Renderer", NULL, 208},
 	{IT_CALL | IT_STRING, NULL, "OpenGL Options...",         M_OpenGLOptionsMenu, 214},
-	{IT_STRING | IT_CVAR, NULL, "FPS Cap",                   &cv_fpscap,          219},
+	{IT_CALL | IT_STRING, NULL, "Stereoscopic 3D...",        M_Stereoscopic3DMenu, 219},
+	{IT_STRING | IT_CVAR, NULL, "FPS Cap",                   &cv_fpscap,          224},
 #endif
 };
 
@@ -1431,6 +1435,19 @@ static menuitem_t OP_OpenGLLightingMenu[] =
 	{IT_STRING|IT_CVAR, NULL, "Static lighting",  &cv_glstaticlighting,  30},
 };
 #endif // ALAM_LIGHTING
+
+static menuitem_t OP_Stereoscopic3DMenu[] =
+{
+	{IT_HEADER, NULL, "Stereoscopic 3D", NULL, 0},
+	{IT_STRING|IT_CVAR,                  NULL, "Display Mode",       &cv_stereomode,             12},
+	{IT_STRING|IT_CVAR|IT_CV_SLIDER,     NULL, "Eye Separation",     &cv_stereoipd,              22},
+	{IT_STRING|IT_CVAR|IT_CV_SLIDER,     NULL, "Convergence Plane",  &cv_stereofoclen,           32},
+	{IT_STRING|IT_CVAR,                  NULL, "Swap Eyes",          &cv_stereoswap,             42},
+
+	{IT_HEADER, NULL, "HUD Depth", NULL, 56},
+	{IT_STRING|IT_CVAR|IT_CV_SLIDER,     NULL, "HUD Depth",          &cv_stereohuddepth,         68},
+	{IT_STRING|IT_CVAR|IT_CV_SLIDER,     NULL, "Crosshair Depth",    &cv_stereocrosshairdepth,   78},
+};
 
 #endif
 
@@ -2198,6 +2215,20 @@ menu_t OP_OpenGLLightingDef = DEFAULTMENUSTYLE(
 	MTREE4(MN_OP_MAIN, MN_OP_VIDEO, MN_OP_OPENGL, MN_OP_OPENGL_LIGHTING),
 	"M_VIDEO", OP_OpenGLLightingMenu, &OP_OpenGLOptionsDef, 60, 40);
 #endif // ALAM_LIGHTING
+
+// Stereoscopic 3D requires the OpenGL renderer; gate behind the same check
+// as OpenGL Options so the user gets a clear "switch renderer first" prompt.
+static void M_Stereoscopic3DMenu(void)
+{
+	if (rendermode == render_opengl)
+		M_SetupNextMenu(&OP_Stereoscopic3DDef);
+	else
+		M_StartMessage(M_GetText("Stereoscopic 3D requires the\nOpenGL renderer.\n\n(Press a key)\n"), NULL, MM_NOTHING);
+}
+
+menu_t OP_Stereoscopic3DDef = DEFAULTMENUSTYLE(
+	MTREE3(MN_OP_MAIN, MN_OP_VIDEO, MN_OP_STEREO3D),
+	"M_VIDEO", OP_Stereoscopic3DMenu, &OP_VideoOptionsDef, 30, 30);
 #endif // HWRENDER
 
 menu_t OP_DataOptionsDef = DEFAULTMENUSTYLE(
@@ -14212,6 +14243,17 @@ const char *QuitScreenMessages[3] = {
 	)
 };
 
+// Per-eye drawer for the quit screen — extracted so it can run inside the
+// R_DrawAcrossStereoEyes loop. Otherwise the patch + text would be drawn
+// once at the full viewport and appear mono in stereo modes.
+static void M_QuitScreenDrawer(void)
+{
+	V_DrawScaledPatch(0, 0, 0, W_CachePatchName("GAMEQUIT", PU_PATCH)); // Demo 3 Quit Screen Tails 06-16-2001
+	V_DrawCenteredString(2+(V_StringWidth(QuitScreenMessages[0], V_ALLOWLOWERCASE)/2), 4, V_ALLOWLOWERCASE, QuitScreenMessages[0]);
+	V_DrawCenteredString(160, 166, V_ALLOWLOWERCASE|V_REDMAP, QuitScreenMessages[1]);
+	V_DrawCenteredString(160, 176, V_ALLOWLOWERCASE, QuitScreenMessages[2]);
+}
+
 void M_QuitResponse(INT32 ch)
 {
 	tic_t ptime;
@@ -14232,10 +14274,7 @@ void M_QuitResponse(INT32 ch)
 		ptime = I_GetTime() + NEWTICRATE*2; // Shortened the quit time, used to be 2 seconds Tails 03-26-2001
 		while (ptime > I_GetTime())
 		{
-			V_DrawScaledPatch(0, 0, 0, W_CachePatchName("GAMEQUIT", PU_PATCH)); // Demo 3 Quit Screen Tails 06-16-2001
-			V_DrawCenteredString(2+(V_StringWidth(QuitScreenMessages[0], V_ALLOWLOWERCASE)/2), 4, V_ALLOWLOWERCASE, QuitScreenMessages[0]);
-			V_DrawCenteredString(160, 166, V_ALLOWLOWERCASE|V_REDMAP, QuitScreenMessages[1]);
-			V_DrawCenteredString(160, 176, V_ALLOWLOWERCASE, QuitScreenMessages[2]);
+			R_DrawAcrossStereoEyes(M_QuitScreenDrawer);
 			I_FinishUpdate(); // Update the screen with the image Tails 06-19-2001
 			I_Sleep(cv_sleep.value);
 			I_UpdateTime(cv_timescale.value);
