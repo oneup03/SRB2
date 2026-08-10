@@ -25,6 +25,7 @@
 #include "../keys.h"
 #include "../m_menu.h"
 #include "../m_misc.h"
+#include "../r_stereo.h" // R_DrawAcrossStereoEyes for the connection screen
 #include "../snake.h"
 #include "../s_sound.h"
 #include "../v_video.h"
@@ -265,6 +266,18 @@ static void CL_DrawConnectionStatus(void)
 				M_GetText("Waiting to download files..."));
 		}
 	}
+}
+
+// The connection screen, factored out so it can be drawn per-eye in stereo.
+// Drawing only - the tickers stay at the call site, because this runs once
+// per eye. Snake_Draw, reached through CL_DrawConnectionStatus, is pure
+// drawing too; Snake_Update is ticked separately.
+static void CL_DrawConnectionScreen(void)
+{
+	if (!snake)
+		F_TitleScreenDrawer();
+	CL_DrawConnectionStatus();
+	M_Drawer(); //Needed for drawing messageboxes on the connection screen
 }
 
 static boolean CL_AskFileList(INT32 firstfile)
@@ -1191,11 +1204,13 @@ static boolean CL_ServerConnectionTicker(const char *tmpsave, tic_t *oldtic, tic
 			{
 				F_MenuPresTicker(); // title sky
 				F_TitleScreenTicker(true);
-				F_TitleScreenDrawer();
 			}
-			CL_DrawConnectionStatus();
 			I_lock_mutex(&m_menu_mutex);
-			M_Drawer(); //Needed for drawing messageboxes on the connection screen
+			// Stereoscopic 3D: this screen draws and presents outside the
+			// D_Display eye loop, so it needs its own per-eye pass -
+			// otherwise the present path composites a mono image as though
+			// it were a stereo pair.
+			R_DrawAcrossStereoEyes(CL_DrawConnectionScreen);
 			I_unlock_mutex(m_menu_mutex);
 			I_UpdateNoVsync(); // page flip or blit buffer
 			if (moviemode)
