@@ -48,7 +48,7 @@ jobs:
         # GITHUB_TOKEN is fine here: nothing currently listens for the
         # post-promotion release.yml run via `workflow_run`. If you ever add
         # such a listener (e.g. a smoke-test workflow on stereo3d), switch
-        # this dispatch to SUBMODULE_PAT — a run dispatched by GITHUB_TOKEN
+        # this dispatch to SHARED_PAT — a run dispatched by GITHUB_TOKEN
         # does not fire `workflow_run` cascades.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

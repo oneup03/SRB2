@@ -1,3 +1,4 @@
-[submodule "thirdparty/LeiaSR32"]
-	path = thirdparty/LeiaSR32
-	url = https://github.com/oneup03/LeiaSR32.git
+[submodule "libs/SR-lib"]
+	path = libs/SR-lib
+	url = https://github.com/bo3b/SR-lib.git
+	branch = api_expansion

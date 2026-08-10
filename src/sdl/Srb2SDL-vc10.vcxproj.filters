@@ -1018,6 +1018,9 @@
     <ClCompile Include="..\r_stereo_leiasr.cpp">
       <Filter>R_Rend</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\libs\SR-lib\SR.cpp">
+      <Filter>R_Rend</Filter>
+    </ClCompile>
     <ClCompile Include="..\r_things.c">
       <Filter>R_Rend</Filter>
     </ClCompile>

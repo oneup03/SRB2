@@ -73,12 +73,12 @@ jobs:
         #   2. A run *dispatched by GITHUB_TOKEN* is itself flagged as
         #      GITHUB_TOKEN-triggered, and its completion does NOT fire
         #      `workflow_run` cascades. That would silently break promote.yml.
-        # Fix: dispatch with a PAT. SUBMODULE_PAT is already provisioned for
+        # Fix: dispatch with a PAT. SHARED_PAT is already provisioned for
         # release.yml's submodule checkouts; it needs Actions: Read and write
         # on this repo for the dispatch to succeed.
         if: steps.rebase.outputs.result == 'clean'
         env:
-          GH_TOKEN: ${{ secrets.SUBMODULE_PAT }}
+          GH_TOKEN: ${{ secrets.SHARED_PAT }}
         run: gh workflow run release.yml --ref auto/upstream-rebase
 
       - name: File / comment conflict issue

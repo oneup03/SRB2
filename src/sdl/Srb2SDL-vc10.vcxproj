@@ -95,6 +95,16 @@
     <Import Project="..\..\libs\SDL_mixer.props" />
     <Import Project="..\..\libs\libgme.props" />
     <Import Project="..\..\libs\libopenmpt.props" />
+    <!-- SR-lib's own property sheet: applies the complete /DELAYLOAD list for
+         the SR runtime DLLs (plus opencv_world343.dll, which the SR import
+         libs drag in through inlined cv::String destructors even though we
+         write no OpenCV code) to whichever Platform is being built. Without
+         delay-loading, the exe refuses to launch on any machine that has never
+         had the LeiaSR Platform installed — a loader popup before main() runs.
+         Do NOT hand-maintain a <DelayLoadDLLs> list alongside this; the whole
+         point is that the list grows with SR-lib and every consumer picks the
+         change up. -->
+    <Import Project="..\..\libs\SR-lib\SR-lib.props" Condition="exists('..\..\libs\SR-lib\SR-lib.props')" />
     <Import Project="Srb2SDL.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -130,6 +140,31 @@
     <Import Project="..\..\SRB2_Release.props" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- LeiaSR / Simulated Reality, via the libs\SR-lib submodule (bo3b/SR-lib,
+       api_expansion branch). That repository is private, so a checkout without
+       it must still build: everything below collapses to empty when SR.cpp is
+       absent, HAVE_LEIASR goes undefined, and r_stereo_leiasr.cpp compiles its
+       stub bodies instead. The SDK tree is nested per architecture — the
+       32-bit root is SR-SDK-<version>\x32, and its SR import libs carry a "32"
+       suffix. Only Win32 is wired up; that's the only Platform this project
+       actually ships. -->
+  <PropertyGroup Label="LeiaSR">
+    <SRLibRoot>$(MSBuildThisFileDirectory)..\..\libs\SR-lib</SRLibRoot>
+    <SRLibSDK>$(SRLibRoot)\SR-SDK-1.34.10\x32</SRLibSDK>
+    <SRLibAvailable Condition="'$(Platform)'=='Win32' And Exists('$(SRLibRoot)\SR.cpp')">true</SRLibAvailable>
+  </PropertyGroup>
+  <PropertyGroup Label="LeiaSR" Condition="'$(SRLibAvailable)'=='true'">
+    <SRLibDefines>HAVE_LEIASR;</SRLibDefines>
+    <SRLibIncludes>$(SRLibRoot);$(SRLibSDK)\include;$(SRLibSDK)\third_party\OpenCV\include;</SRLibIncludes>
+    <!-- Mirrors SR-lib's own SimulatedReality.vcxproj librarian input for
+         Win32. opencv_world343 is not optional even though we write no OpenCV
+         code: the SR import libs inline cv::String destructors, so the linker
+         needs it to resolve them. Delay-loading of all of these comes from
+         SR-lib.props (imported above) — never hand-maintain a DelayLoadDLLs
+         list alongside it. -->
+    <SRLibLibs>opencv_world343.lib;SimulatedRealityCore32.lib;SimulatedRealityDirectX32.lib;SimulatedRealityDisplays32.lib;SimulatedRealityFaceTrackers32.lib;SimulatedRealityOpenGL32.lib;opengl32.lib;</SRLibLibs>
+    <SRLibLibDirs>$(SRLibSDK)\lib;$(SRLibSDK)\third_party\OpenCV\lib\x86;</SRLibLibDirs>
+  </PropertyGroup>
   <PropertyGroup>
     <_ProjectFileVersion>10.0.30319.1</_ProjectFileVersion>
     <RunCodeAnalysis>false</RunCodeAnalysis>
@@ -165,8 +200,8 @@
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <MinimalRebuild>false</MinimalRebuild>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <PreprocessorDefinitions>HAVE_CURL;HAVE_LEIASR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\..\libs\curl\include;..\..\thirdparty\LeiaSR32\include;..\..\thirdparty\LeiaSR32\third_party\OpenCV\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_CURL;$(SRLibDefines)%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\libs\curl\include;$(SRLibIncludes)%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <CustomBuild>
       <Command />
@@ -178,19 +213,8 @@
       <Outputs />
     </CustomBuild>
     <Link>
-      <AdditionalDependencies>libcurl.dll.a;libz32.a;simulatedreality32.lib;SimulatedRealityCore32.lib;SimulatedRealityOpenGL32.lib;DimencoWeaving32.lib;opencv_world343.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;..\..\thirdparty\LeiaSR32\lib;..\..\thirdparty\LeiaSR32\third_party\OpenCV\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <!-- LeiaSR DLLs (and their direct OpenCV dep) are delay-loaded so the
-           game can launch on machines that don't have the LeiaSR runtime /
-           Leia hardware installed. Only the DLLs we actually import symbols
-           from are listed here — simulatedreality32.dll and DimencoWeaving32.dll
-           are umbrella .libs that forward to Core/OpenGL at link time, so
-           the exe has no direct imports from them (LNK4199 otherwise).
-           Transitive deps (realsense2, libserialport32, vcruntime, etc.)
-           load via the loader chain when these three load, and our runtime
-           probe in r_stereo_leiasr.cpp catches the failure if any are
-           missing. -->
-      <DelayLoadDLLs>SimulatedRealityCore32.dll;SimulatedRealityOpenGL32.dll;opencv_world343.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>libcurl.dll.a;libz32.a;$(SRLibLibs)%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;$(SRLibLibDirs)%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
@@ -201,8 +225,8 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <ClCompile>
       <DisableSpecificWarnings>4244;4267;4146;4003</DisableSpecificWarnings>
-      <PreprocessorDefinitions>HAVE_CURL;HAVE_LEIASR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>..\..\libs\curl\include;..\..\thirdparty\LeiaSR32\include;..\..\thirdparty\LeiaSR32\third_party\OpenCV\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>HAVE_CURL;$(SRLibDefines)%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>..\..\libs\curl\include;$(SRLibIncludes)%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <TreatWarningAsError>false</TreatWarningAsError>
     </ClCompile>
     <CustomBuild>
@@ -215,19 +239,8 @@
       <Outputs />
     </CustomBuild>
     <Link>
-      <AdditionalDependencies>libcurl.dll.a;libz32.a;simulatedreality32.lib;SimulatedRealityCore32.lib;SimulatedRealityOpenGL32.lib;DimencoWeaving32.lib;opencv_world343.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;..\..\thirdparty\LeiaSR32\lib;..\..\thirdparty\LeiaSR32\third_party\OpenCV\lib\x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <!-- LeiaSR DLLs (and their direct OpenCV dep) are delay-loaded so the
-           game can launch on machines that don't have the LeiaSR runtime /
-           Leia hardware installed. Only the DLLs we actually import symbols
-           from are listed here — simulatedreality32.dll and DimencoWeaving32.dll
-           are umbrella .libs that forward to Core/OpenGL at link time, so
-           the exe has no direct imports from them (LNK4199 otherwise).
-           Transitive deps (realsense2, libserialport32, vcruntime, etc.)
-           load via the loader chain when these three load, and our runtime
-           probe in r_stereo_leiasr.cpp catches the failure if any are
-           missing. -->
-      <DelayLoadDLLs>SimulatedRealityCore32.dll;SimulatedRealityOpenGL32.dll;opencv_world343.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>libcurl.dll.a;libz32.a;$(SRLibLibs)%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>..\..\libs\zlib\win32;..\..\libs\curl\lib32;$(SRLibLibDirs)%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
@@ -618,6 +631,24 @@
     <ClCompile Include="..\r_stereo.c" />
     <ClCompile Include="..\r_stereo_leiasr.cpp">
       <CompileAs>CompileAsCpp</CompileAs>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <!-- C4005: SR.hpp drags in the DirectX headers, which reach <float.h>
+           after doomdef.h has already defined FLT_EPSILON / DBL_EPSILON to the
+           same values. -->
+      <DisableSpecificWarnings>4005;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+    </ClCompile>
+    <!-- SR-lib's SRInterface* wrapper (bo3b/SR-lib, api_expansion branch).
+         Compiled into the exe rather than consumed as SimulatedReality.vcxproj:
+         that project only offers Debug-MT/Release-MD-style configurations,
+         which don't line up with SRB2's Debug/Release, and it is a single TU.
+         SRLibAvailable is false on non-Win32 and on checkouts without the
+         (private) submodule; both cases fall back to the stubs in
+         r_stereo_leiasr.cpp. -->
+    <ClCompile Include="..\..\libs\SR-lib\SR.cpp">
+      <CompileAs>CompileAsCpp</CompileAs>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <ExcludedFromBuild Condition="'$(SRLibAvailable)'!='true'">true</ExcludedFromBuild>
+      <DisableSpecificWarnings>4100;4189;4244;4267;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <ClCompile Include="..\r_textures.c" />
     <ClCompile Include="..\r_things.c" />

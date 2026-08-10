@@ -90,6 +90,8 @@
 #include "ogl_sdl.h"
 #endif
 
+#include "../r_stereo_leiasr.h"
+
 // maximum number of windowed modes (see windowedModes[][])
 #define MAXWINMODES (17)
 
@@ -1833,6 +1835,13 @@ void I_StartupGraphics(void)
 
 	keyboard_started = true;
 
+#ifdef _WIN32
+	// main() already declared the process per-monitor-DPI-aware (see the
+	// comment there); this stops SDL from asking for something weaker and
+	// keeps its own idea of the awareness in sync with what actually took.
+	SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#endif
+
 #if !defined(HAVE_TTF)
 	// Previously audio was init here for questionable reasons?
 	if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0)
@@ -2058,6 +2067,11 @@ void I_ShutdownGraphics(void)
 	I_OutputMsg("shut down\n");
 
 #ifdef HWRENDER
+	// Before the GL context goes away: the SR runtime holds GL resources keyed
+	// to it, and dropping the context out from under the weaver can leave the
+	// SR service degraded for the next launch.
+	R_LeiaSR_Shutdown();
+
 	if (sdlglcontext)
 	{
 		SDL_GL_DeleteContext(sdlglcontext);

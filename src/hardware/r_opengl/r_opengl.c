@@ -3287,21 +3287,30 @@ EXPORT UINT32 HWRAPI(GetScreenTextureID) (int tex)
 // normalized [0,1] across the entire texture — the standard MakeScreenTexture
 // allocates a power-of-2 texture and leaves padding around the captured area,
 // which would show up as black bars in the consumer's output.
+static GLint screenTextureSizes[NUMSCREENTEXTURES][2] = {{0}};
 EXPORT void HWRAPI(MakeScreenTextureExact) (int tex)
 {
 	const boolean firstTime = (screenTextures[tex] == 0);
+	// The allocated size has to be re-checked every call: screen_width /
+	// screen_height change when the user switches video resolution, and a
+	// CopyTexSubImage2D larger than the allocation is a GL_INVALID_VALUE that
+	// silently leaves the weaver sampling the previous resolution's frame.
+	const boolean sizeChange = !firstTime &&
+		(screenTextureSizes[tex][0] != screen_width || screenTextureSizes[tex][1] != screen_height);
 
 	if (firstTime)
 		pglGenTextures(1, &screenTextures[tex]);
 	pglBindTexture(GL_TEXTURE_2D, screenTextures[tex]);
 
-	if (firstTime)
+	if (firstTime || sizeChange)
 	{
 		pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 		pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 		Clamp2D(GL_TEXTURE_WRAP_S);
 		Clamp2D(GL_TEXTURE_WRAP_T);
 		pglCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 0, 0, screen_width, screen_height, 0);
+		screenTextureSizes[tex][0] = screen_width;
+		screenTextureSizes[tex][1] = screen_height;
 	}
 	else
 	{
@@ -3317,7 +3326,6 @@ EXPORT void HWRAPI(MakeScreenTextureExact) (int tex)
 // SDL window can be resized between calls). Used by the LeiaSR path so
 // the SR weaver receives an input texture sized to the SDL window even
 // when the engine renders at a smaller internal resolution.
-static GLint screenTextureSizes[NUMSCREENTEXTURES][2] = {{0}};
 EXPORT void HWRAPI(MakeScreenTextureSized) (int tex, INT32 width, INT32 height)
 {
 	const boolean firstTime  = (screenTextures[tex] == 0);

@@ -32,7 +32,7 @@ jobs:
           cat > /tmp/notes.md <<EOF
           Automatic build from commit $GITHUB_SHA on \`$GITHUB_REF_NAME\`.
 
-          **Windows** zip bundles the v2.2.15 game assets, freshly built \`srb2win.exe\`, and the LeiaSR runtime DLLs.
+          **Windows** zip bundles the v2.2.15 game assets and a freshly built \`srb2win.exe\`. LeiaSR mode additionally requires the LeiaSR Platform runtime to be installed on the machine (it is no longer bundled); without it the game runs normally and LeiaSR mode falls back to Side-by-Side.
 
           **Linux** AppImage bundles the v2.2.15 game assets and a portable \`lsdlsrb2\` binary. LeiaSR is not included (Windows-only); all other stereo modes (SbS, TaB, Anaglyph, Row/Column-Interlaced, Checkerboard) are available. If FUSE is unavailable, run \`./SRB2-*.AppImage --appimage-extract-and-run\`.
           EOF
@@ -59,7 +59,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-          token: ${{ secrets.SUBMODULE_PAT }}
+          token: ${{ secrets.SHARED_PAT }}
 
       - name: Setup MSBuild
         uses: microsoft/setup-msbuild@v2
@@ -105,8 +105,13 @@ jobs:
             Copy-Item -Force $ext -Destination (Join-Path $root 'SDL2_mixer.dll')
           }
 
-          # Drop in the LeiaSR runtime DLLs.
-          Copy-Item -Force 'thirdparty\LeiaSR32\bin\*.dll' -Destination $root
+          # No LeiaSR runtime DLLs are bundled. They belong to the machine-wide
+          # LeiaSR Platform install (which also provides the SR service the
+          # runtime needs, so a bundled copy would be useless without it) and
+          # are shared with every other SR application — shipping our own would
+          # only risk version conflicts. The exe delay-loads them and probes
+          # with LoadLibraryW before use, so it launches and plays normally on
+          # machines that don't have them; LeiaSR mode falls back to plain SbS.
 
           $short = $env:GITHUB_SHA.Substring(0,7)
           $zip   = "SRB2-stereo3d-$short-Win32.zip"
@@ -139,7 +144,7 @@ jobs:
         with:
           submodules: recursive
           fetch-depth: 0
-          token: ${{ secrets.SUBMODULE_PAT }}
+          token: ${{ secrets.SHARED_PAT }}
 
       - name: Install build dependencies
         run: |

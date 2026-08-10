@@ -8,6 +8,25 @@
 //-----------------------------------------------------------------------------
 /// \file  r_stereo_leiasr.cpp
 /// \brief LeiaSR autostereoscopic display weaver bridge (C++ implementation).
+///
+/// Thin adapter over SR-lib's SimulatedReality::SRInterfaceOGL wrapper
+/// (libs/SR-lib — bo3b/SR-lib, api_expansion branch). CreateSRInterfaceOGL()
+/// replaces what used to be hand-rolled here:
+///
+///   * LoadLibraryW probing of the delay-loaded SR DLLs, core *and* the
+///     OpenGL backend DLL, before any SDK entry point is touched. A delay-load
+///     failure raises SEH, which a C++ catch can't intercept without /EHa.
+///   * SRContext::create() -> CreateGLWeaver() -> initialize(), in that order.
+///     initialize() running before weaver creation (or not at all) leaves eye
+///     tracking dead while every call still reports success — the panel shows
+///     an image that ignores head motion.
+///   * Destroying the context with SRContext::deleteSRContext() rather than
+///     `delete`, since the object lives inside the SR DLL.
+///   * Containing SR's C++ exceptions behind an HRESULT return.
+///
+/// What stays on this side: the one-shot init latch, the SbS-texture binding
+/// cache, and a try/catch around Weave() so unplugging the SR display
+/// mid-session downgrades to the SbS fallback instead of killing the process.
 
 extern "C" {
 #include "doomtype.h"
@@ -15,66 +34,94 @@ extern "C" {
 #include "r_stereo_leiasr.h"
 }
 
-#ifdef _WIN32
+// HAVE_LEIASR is set only by the configurations that actually point at the SR
+// SDK (Win32, where libs/SR-lib ships a 32-bit import-library tree). Everything
+// else — x64/ARM MSVC configurations, and the CMake/Linux build — falls through
+// to the stubs at the bottom, so no #ifdef leaks into the call sites.
+#if defined(_WIN32) && defined(HAVE_LEIASR)
 
-// Windows + LeiaSR pulls in <windows.h>; do that before anything that might
-// clash. Wrapping in our own include block keeps SDL/Doom symbols isolated
-// from the LeiaSR side.
+// doomtype.h #defines boolean -> bool. SR.hpp pulls in <d3d9.h> -> <unknwn.h>
+// -> <rpcndr.h>, which contains `typedef unsigned char boolean;` — with the
+// macro live that becomes `typedef unsigned char bool;` and the TU stops
+// compiling. Drop the macro across the SR/Windows includes, restore it after.
+#undef boolean
+
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdexcept>
 
-#include <sr/management/srcontext.h>
-#include <sr/weaver/glweaver.h>
+#include "SR.hpp"
+
+#define boolean bool
 
 namespace {
 
-// LeiaSR holds its SRContext and weaver for the lifetime of the GL context.
-// One context + one weaver = one Leia display target.
-SR::SRContext *g_context = nullptr;
-SR::IGLWeaver1 *g_weaver = nullptr;
+// One interface for the process; SR-lib keeps the SRContext behind it and
+// tears it down when the last interface is Delete()d.
+SimulatedReality::SRInterfaceOGL *g_sr = nullptr;
 bool g_init_attempted = false;
 bool g_available = false;
 
-// Required LeiaSR DLLs (and their direct OpenCV dependency). These are
-// configured as DelayLoadDLLs in Srb2SDL-vc10.vcxproj so the import resolver
-// won't refuse to launch the .exe when they're absent — but we still have
-// to gate any actual call into them on the DLLs being present, otherwise the
-// first call would trigger a delay-load failure (SEH, may or may not be
-// catchable depending on /EHa). LoadLibraryW returns NULL when the DLL OR
-// any of its transitive dependencies are missing, so a successful probe
-// here is a clean go-signal for the rest of the LeiaSR init.
-//
-// Only the DLLs the exe actually imports symbols from need to be probed —
-// simulatedreality32.dll and DimencoWeaving32.dll are umbrella .libs that
-// forward through Core/OpenGL at link time, so probing those two would be
-// a wasted LoadLibrary. The transitive deps (realsense2, libserialport32,
-// vcruntime, msvcp, glog, etc.) load implicitly when Core/OpenGL/OpenCV
-// load — if any are missing, LoadLibraryW returns NULL for the parent and
-// the probe naturally catches it.
-const wchar_t *const k_required_dlls[] = {
-	L"SimulatedRealityCore32.dll",
-	L"SimulatedRealityOpenGL32.dll",
-	L"opencv_world343.dll",
-};
+// Binding cache. SetInputTexture re-binds the weaver's sampling source (and
+// re-queries the texture's size/format from GL), which isn't free, so only do
+// it when something actually changed. SRB2's screen-texture slots keep the
+// same GL name across a resolution change and re-allocate the storage under
+// it, hence the dimensions in the key.
+unsigned int g_last_tex = 0;
+int g_last_w = 0;
+int g_last_h = 0;
 
-bool ProbeLeiaSRDLLs(void)
+void DestroyInterface(void)
 {
-	for (const wchar_t *name : k_required_dlls)
+	if (g_sr)
 	{
-		HMODULE h = LoadLibraryW(name);
-		if (!h)
-			return false;
-		// We don't keep the handle around — the delay-loaded import will
-		// LoadLibrary it again at the first call, which is cheap because
-		// the loader maintains a reference count and finds the already-
-		// resolved module immediately.
-		FreeLibrary(h);
+		try { g_sr->Delete(); } catch (...) {}
+		g_sr = nullptr;
 	}
-	return true;
+	g_last_tex = 0;
+	g_last_w = 0;
+	g_last_h = 0;
 }
 
 } // namespace
+
+extern "C" void R_LeiaSR_SetupDpiAwareness(void)
+{
+	// Resolved dynamically so the exe still starts on Windows versions that
+	// predate each entry point. Newest first; the first one that takes wins,
+	// and any later call is a no-op anyway (awareness is one-shot per process).
+	typedef BOOL (WINAPI *pfnSetProcessDpiAwarenessContext)(HANDLE);
+	typedef HRESULT (WINAPI *pfnSetProcessDpiAwareness)(int);
+
+	HMODULE user32 = GetModuleHandleW(L"user32.dll");
+	if (user32)
+	{
+		pfnSetProcessDpiAwarenessContext set_ctx =
+			(pfnSetProcessDpiAwarenessContext)(void *)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+		// DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+		if (set_ctx && set_ctx((HANDLE)-4))
+			return;
+	}
+
+	{
+		// Windows 8.1 fallback. shcore.dll is loaded on demand — we're the
+		// only user of it, so there's nothing to keep it alive for.
+		HMODULE shcore = LoadLibraryW(L"shcore.dll");
+		if (shcore)
+		{
+			pfnSetProcessDpiAwareness set_aware =
+				(pfnSetProcessDpiAwareness)(void *)GetProcAddress(shcore, "SetProcessDpiAwareness");
+			// PROCESS_PER_MONITOR_DPI_AWARE == 2
+			const bool ok = (set_aware && SUCCEEDED(set_aware(2)));
+			FreeLibrary(shcore);
+			if (ok)
+				return;
+		}
+	}
+
+	// Vista fallback: system-DPI aware only, but still better than virtualized.
+	SetProcessDPIAware();
+}
 
 extern "C" boolean R_LeiaSR_Init(void *hwnd)
 {
@@ -82,53 +129,44 @@ extern "C" boolean R_LeiaSR_Init(void *hwnd)
 		return g_available ? true : false;
 	g_init_attempted = true;
 
-	// DLL availability probe BEFORE touching any LeiaSR API. If the LeiaSR
-	// runtime isn't installed (or one of the transitive deps like
-	// opencv_world343.dll is missing), bail to SbS fallback silently — this
-	// is the common case on machines without Leia hardware and shouldn't
-	// produce scary console spam.
-	if (!ProbeLeiaSRDLLs())
+	if (hwnd == NULL)
 	{
-		g_available = false;
+		// No HWND yet — the SDL window isn't up. Re-arm so a later frame can
+		// try again rather than latching "unavailable" for the session.
+		g_init_attempted = false;
 		return false;
 	}
 
-	// Construction can throw if the SR runtime/service isn't reachable, or
-	// if no Leia display is connected. Catch any failure and downgrade to
-	// "not available" so the caller falls back to plain SbS.
-	try
+	// SR-lib probes the delay-loaded SR DLLs (core + SimulatedRealityOpenGL32)
+	// with LoadLibraryW before touching the SDK, so a machine without the SR
+	// runtime installed lands here as a plain E_NOINTERFACE rather than an
+	// uncatchable delay-load SEH. Missing runtime is the common case on
+	// machines without Leia hardware, so keep that path quiet.
+	const HRESULT hr = SimulatedReality::CreateSRInterfaceOGL(
+		reinterpret_cast<HWND>(hwnd), &g_sr);
+	if (FAILED(hr) || g_sr == nullptr)
 	{
-		g_context = new SR::SRContext();
-		const WeaverErrorCode err = SR::CreateGLWeaver(*g_context,
-			reinterpret_cast<HWND>(hwnd), &g_weaver);
-		if (err != WeaverSuccess || g_weaver == nullptr)
-		{
-			CONS_Alert(CONS_WARNING, "LeiaSR: CreateGLWeaver failed (code %d); LeiaSR mode unavailable.\n", (int)err);
-			delete g_context;
-			g_context = nullptr;
-			g_weaver = nullptr;
-			g_available = false;
-			return false;
-		}
-		g_context->initialize();
-		g_available = true;
-		CONS_Printf("LeiaSR: weaver initialized.\n");
-		return true;
-	}
-	catch (const std::exception &ex)
-	{
-		CONS_Alert(CONS_WARNING, "LeiaSR: init threw: %s — LeiaSR mode unavailable.\n", ex.what());
-	}
-	catch (...)
-	{
-		CONS_Alert(CONS_WARNING, "LeiaSR: init threw an unknown exception — LeiaSR mode unavailable.\n");
+		g_sr = nullptr;
+		g_available = false;
+		if (hr != E_NOINTERFACE)
+			CONS_Alert(CONS_WARNING, "LeiaSR: weaver creation failed (0x%08lX); falling back to Side-by-Side.\n", (unsigned long)hr);
+		return false;
 	}
 
-	if (g_weaver) { g_weaver->destroy(); g_weaver = nullptr; }
-	delete g_context;
-	g_context = nullptr;
-	g_available = false;
-	return false;
+	// SRB2's screen textures are plain GL_RGBA (no sRGB view) and the eye loop
+	// writes sRGB-encoded values into them, while the default framebuffer is
+	// likewise a non-sRGB surface — so the weaver should decode on read and
+	// re-encode on write. There is no universally right answer here; this is
+	// the pairing that matches our formats.
+	try
+	{
+		g_sr->SetShaderSRGBConversion(true, true);
+	}
+	catch (...) {}
+
+	g_available = true;
+	CONS_Printf("LeiaSR: weaver initialized.\n");
+	return true;
 }
 
 extern "C" boolean R_LeiaSR_Available(void)
@@ -138,17 +176,24 @@ extern "C" boolean R_LeiaSR_Available(void)
 
 extern "C" void R_LeiaSR_Weave(unsigned int tex_id, int width, int height)
 {
-	if (!g_available || g_weaver == nullptr)
+	if (!g_available || g_sr == nullptr)
 		return;
 
-	// SRB2 backbuffer is RGBA8 (or RGB5_A1 in low-bpp mode). Pass GL_RGBA;
-	// the weaver will sample as needed.
+	// SR-lib's Weave() calls straight into the SDK weaver, which throws if the
+	// SR service dies or the display is unplugged mid-session. Catch it here
+	// and downgrade to the SbS fallback for the rest of the session.
 	try
 	{
-		g_weaver->setInputViewTexture(tex_id, width, height, /*GL_RGBA=*/0x1908);
-		// IWeaverBase1::weave() takes no arguments — uses the bound viewport
-		// and the input texture set above.
-		g_weaver->weave();
+		if (tex_id != g_last_tex || width != g_last_w || height != g_last_h)
+		{
+			// Dimensions and internal format are read off the GL texture
+			// object by SR-lib; we only pass the name.
+			g_sr->SetInputTexture(tex_id);
+			g_last_tex = tex_id;
+			g_last_w = width;
+			g_last_h = height;
+		}
+		g_sr->Weave();
 	}
 	catch (const std::exception &ex)
 	{
@@ -164,25 +209,17 @@ extern "C" void R_LeiaSR_Weave(unsigned int tex_id, int width, int height)
 
 extern "C" void R_LeiaSR_Shutdown(void)
 {
-	if (g_weaver)
-	{
-		try { g_weaver->destroy(); } catch (...) {}
-		g_weaver = nullptr;
-	}
-	if (g_context)
-	{
-		delete g_context;
-		g_context = nullptr;
-	}
+	DestroyInterface();
 	g_available = false;
 	g_init_attempted = false;
 }
 
-#else // !_WIN32 — LeiaSR is Windows-only. Stub everything.
+#else // no SR SDK in this configuration — stub everything.
 
-extern "C" boolean R_LeiaSR_Init(void *hwnd)              { (void)hwnd; return false; }
-extern "C" boolean R_LeiaSR_Available(void)               { return false; }
-extern "C" void    R_LeiaSR_Weave(unsigned int t, int w, int h) { (void)t; (void)w; (void)h; }
-extern "C" void    R_LeiaSR_Shutdown(void)                {}
+extern "C" void    R_LeiaSR_SetupDpiAwareness(void)              { }
+extern "C" boolean R_LeiaSR_Init(void *hwnd)                     { (void)hwnd; return false; }
+extern "C" boolean R_LeiaSR_Available(void)                      { return false; }
+extern "C" void    R_LeiaSR_Weave(unsigned int t, int w, int h)  { (void)t; (void)w; (void)h; }
+extern "C" void    R_LeiaSR_Shutdown(void)                       { }
 
 #endif

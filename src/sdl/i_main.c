@@ -22,6 +22,7 @@
 #include "../d_main.h"
 #include "../m_misc.h"/* path shit */
 #include "../i_system.h"
+#include "../r_stereo_leiasr.h"
 
 #if defined (__GNUC__) || defined (__unix__)
 #include <unistd.h>
@@ -177,6 +178,26 @@ int main(int argc, char **argv)
 {
 	myargc = argc;
 	myargv = argv; /// \todo pull out path to exe from this string
+
+#ifdef _WIN32
+	// Declare per-monitor DPI awareness before ANYTHING touches SDL's video
+	// subsystem. Process DPI awareness is one-shot — the first declaration
+	// wins and every later call silently no-ops — and SDL declares it itself
+	// inside SDL_Init/SDL_InitSubSystem(SDL_INIT_VIDEO), so doing this
+	// afterwards would be a no-op we couldn't detect.
+	//
+	// Without it, a display at >100% Windows scale makes the OS render our
+	// window into a virtualized sub-region and stretch it up, so the backbuffer
+	// is no longer in physical panel pixels. That silently breaks every display
+	// mode that has to line up 1:1 with the panel grid: the LeiaSR lenticular
+	// weave, and the row/column-interlaced and checkerboard stereo modes.
+	//
+	// Pure Win32, no SDL headers needed here. I_StartupGraphics additionally
+	// sets SDL_HINT_WINDOWS_DPI_AWARENESS so SDL agrees with us rather than
+	// claiming something weaker; by then this call has already won, which is
+	// the load-bearing half.
+	R_LeiaSR_SetupDpiAwareness();
+#endif
 
 #ifdef HAVE_TTF
 #ifdef _WIN32
