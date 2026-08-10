@@ -2,6 +2,40 @@
     "version": "2.0.0",
     "tasks": [
         {
+            // Default: build, then drop the fresh exe into the play folder.
+            "label": "Build & Deploy SRB2 (Release)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Build SRB2 (Release)",
+                "Deploy to game folder (Release)"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Build & Deploy SRB2 (Debug)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Build SRB2 (Debug)",
+                "Deploy to game folder (Debug)"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "Rebuild & Deploy SRB2 (Release)",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "Rebuild SRB2 (Release)",
+                "Deploy to game folder (Release)"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
             "label": "Build SRB2 (Release)",
             "type": "shell",
             "command": "powershell",
@@ -11,10 +45,7 @@
                 "-File", "${workspaceFolder}/build.ps1",
                 "-Configuration", "Release"
             ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            },
+            "group": "build",
             "problemMatcher": "$msCompile",
             "presentation": {
                 "reveal": "always",
@@ -57,6 +88,50 @@
                 "reveal": "always",
                 "panel": "shared",
                 "clear": true
+            }
+        },
+        {
+            // Only the build products move — the play folder already has the
+            // SDL / curl / openmpt runtime DLLs, and the LeiaSR runtime DLLs
+            // are deliberately NOT copied: they belong to the machine-wide
+            // LeiaSR Platform install, and a stale local copy would shadow it.
+            "label": "Deploy to game folder (Release)",
+            // "process", not "shell": the -Command payload is one argument and
+            // a shell layer would re-parse its quoting. It also deliberately
+            // contains no double quotes, so nothing needs escaping either way.
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "$src='${workspaceFolder}/bin/VC10/Win32/Release'; $dst=Resolve-Path '${workspaceFolder}/../game' -ErrorAction SilentlyContinue; if (-not $dst) { Write-Error 'game folder not found next to the repo'; exit 1 }; foreach ($f in 'Srb2Win.exe','Srb2Win.pdb') { $p=Join-Path $src $f; if (Test-Path $p) { Copy-Item -Force $p -Destination $dst; Write-Host ('copied ' + $f) } }; Write-Host ('Deployed to ' + $dst)"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": false
+            }
+        },
+        {
+            // Debug configuration links as Srb2Win_Debug.exe (TargetName in
+            // Srb2SDL-vc10.vcxproj), so it lands alongside the Release exe
+            // rather than replacing it.
+            "label": "Deploy to game folder (Debug)",
+            "type": "process",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "$src='${workspaceFolder}/bin/VC10/Win32/Debug'; $dst=Resolve-Path '${workspaceFolder}/../game' -ErrorAction SilentlyContinue; if (-not $dst) { Write-Error 'game folder not found next to the repo'; exit 1 }; foreach ($f in 'Srb2Win_Debug.exe','Srb2Win_Debug.pdb') { $p=Join-Path $src $f; if (Test-Path $p) { Copy-Item -Force $p -Destination $dst; Write-Host ('copied ' + $f) } }; Write-Host ('Deployed to ' + $dst)"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": false
             }
         }
     ]
