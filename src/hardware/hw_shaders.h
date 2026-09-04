@@ -349,6 +349,58 @@
 		"gl_FragColor = final_color;\n" \
 	"}\0"
 
+//
+// Ghost / crosstalk reduction (shared by every stereo composite shader).
+//
+// Every stereo display leaks some of each eye's image into the other. How
+// visible that leak is depends on the BRIGHTNESS DIFFERENCE between the eyes,
+// so compressing the signal range before it reaches the display reduces what
+// you actually see -- the standard range-compression approach from the stereo
+// crosstalk literature. Two levers, both global, both exact no-ops at their
+// defaults:
+//
+//   stereo_ghost_contrast (1.0 = off) squeezes everything toward mid-grey.
+//     That shrinks |L - R| directly and leaves (1 - contrast)/2 of headroom at
+//     BOTH ends of the range. Costs contrast across the whole image. 0.90 is a
+//     good first try; go lower only if edges still ghost.
+//
+//   stereo_ghost_lift (0.0 = off) raises the black floor and leaves white
+//     alone. This one is for displays that actively CANCEL crosstalk by
+//     pre-subtracting a fraction of the opposite eye -- LeiaSR's weaver does.
+//     That subtraction drives dark pixels below zero, the render target clamps
+//     them, and the clipped part is exactly what survives as a visible ghost.
+//     Lift buys the "foot-room" the cancellation needs, targeting the end that
+//     actually clips instead of spending most of its effect on highlights.
+//     0.02-0.05 is the useful band; blacks go grey fast above that. On a
+//     display that does NOT cancel there is no clipping to relieve, and only
+//     contrast helps.
+//
+// The remap must run in the space the display's cancellation runs in.
+// Cancelling displays generally work in linear light, so this pivots around
+// 0.5 in linear via a plain 2.2 gamma rather than the piecewise sRGB curve --
+// getting that backwards makes ghosting worse, not better.
+//
+// Deliberately NOT adaptive. Localizing it spatially cannot work: ghosting IS
+// inter-eye difference, so a correction applied unevenly manufactures more of
+// it and leaks in turn. Deriving a global scalar per frame is structurally
+// sound but reads as the whole image pumping brighter and darker as content
+// changes; a fixed slider is less distracting than a correct but moving one.
+//
+// The snippet is textually pasted into each composite shader below rather
+// than #included, because SRB2's shaders are string literals with no
+// preprocessor of their own.
+#define GLSL_STEREO_GHOST_REDUCE \
+	"uniform float stereo_ghost_contrast;\n" \
+	"uniform float stereo_ghost_lift;\n" \
+	"vec3 ghost_reduce(vec3 c) {\n" \
+		"if (stereo_ghost_contrast == 1.0 && stereo_ghost_lift == 0.0)\n" \
+			"return c;\n" \
+		"vec3 lin = pow(clamp(c, 0.0, 1.0), vec3(2.2));\n" \
+		"lin = (lin - 0.5) * stereo_ghost_contrast + 0.5;\n" \
+		"lin = lin * (1.0 - stereo_ghost_lift) + stereo_ghost_lift;\n" \
+		"return pow(clamp(lin, 0.0, 1.0), vec3(1.0 / 2.2));\n" \
+	"}\n"
+
 // Composite a TaB-rendered source texture (top half = eye 0, bottom half =
 // eye 1) into a row-interleaved output. For each destination row we sample
 // either the top half or the bottom half of the source based on the row's
@@ -361,6 +413,7 @@
 // the bottom half (eye 1).
 #define GLSL_ROW_INTERLACED_COMPOSITE_FRAGMENT_SHADER \
 	"uniform sampler2D tex;\n" \
+	GLSL_STEREO_GHOST_REDUCE \
 	"void main(void) {\n" \
 		"vec2 uv = gl_TexCoord[0].st;\n" \
 		"int row = int(gl_FragCoord.y);\n" \
@@ -368,7 +421,7 @@
 			"uv.y = uv.y * 0.5 + 0.5;\n" \
 		"else\n" \
 			"uv.y = uv.y * 0.5;\n" \
-		"gl_FragColor = texture2D(tex, uv);\n" \
+		"gl_FragColor = vec4(ghost_reduce(texture2D(tex, uv).rgb), 1.0);\n" \
 	"}\0"
 
 // Composite an SbS-rendered source texture (left half = eye 0, right half =
@@ -377,6 +430,7 @@
 // odd columns → right half (eye 1).
 #define GLSL_COLUMN_INTERLACED_COMPOSITE_FRAGMENT_SHADER \
 	"uniform sampler2D tex;\n" \
+	GLSL_STEREO_GHOST_REDUCE \
 	"void main(void) {\n" \
 		"vec2 uv = gl_TexCoord[0].st;\n" \
 		"int col = int(gl_FragCoord.x);\n" \
@@ -384,7 +438,7 @@
 			"uv.x = uv.x * 0.5;\n" \
 		"else\n" \
 			"uv.x = uv.x * 0.5 + 0.5;\n" \
-		"gl_FragColor = texture2D(tex, uv);\n" \
+		"gl_FragColor = vec4(ghost_reduce(texture2D(tex, uv).rgb), 1.0);\n" \
 	"}\0"
 
 // Composite an SbS-rendered source texture into a checkerboard output for
@@ -392,6 +446,7 @@
 // half: even sum → left half (eye 0); odd sum → right half (eye 1).
 #define GLSL_CHECKERBOARD_COMPOSITE_FRAGMENT_SHADER \
 	"uniform sampler2D tex;\n" \
+	GLSL_STEREO_GHOST_REDUCE \
 	"void main(void) {\n" \
 		"vec2 uv = gl_TexCoord[0].st;\n" \
 		"int col = int(gl_FragCoord.x);\n" \
@@ -401,7 +456,7 @@
 			"uv.x = uv.x * 0.5;\n" \
 		"else\n" \
 			"uv.x = uv.x * 0.5 + 0.5;\n" \
-		"gl_FragColor = texture2D(tex, uv);\n" \
+		"gl_FragColor = vec4(ghost_reduce(texture2D(tex, uv).rgb), 1.0);\n" \
 	"}\0"
 
 // Composite an SbS-rendered source texture (left half = eye A / left eye,
@@ -417,6 +472,7 @@
 // look smeary and color-warped.
 #define GLSL_ANAGLYPH_DUBOIS_COMPOSITE_FRAGMENT_SHADER \
 	"uniform sampler2D tex;\n" \
+	GLSL_STEREO_GHOST_REDUCE \
 	"void main(void) {\n" \
 		"vec2 uv = gl_TexCoord[0].st;\n" \
 		"vec2 uvL = vec2(uv.x * 0.5,        uv.y);\n" \
@@ -429,7 +485,21 @@
 		                "+0.377*cB.r + 0.761*cB.g + 0.009*cB.b, 0.0, 1.0);\n" \
 		"float b = clamp(-0.048*cA.r - 0.050*cA.g - 0.017*cA.b\n" \
 		                "-0.026*cB.r - 0.093*cB.g + 1.234*cB.b, 0.0, 1.0);\n" \
-		"gl_FragColor = vec4(r, g, b, 1.0);\n" \
+		"gl_FragColor = vec4(ghost_reduce(vec3(r, g, b)), 1.0);\n" \
+	"}\0"
+
+// Ghost reduction with no repacking: samples the source 1:1 and applies the
+// range compression above. This is the path for the output modes that have no
+// composite step of their own -- plain Side-by-Side, Top-and-Bottom, and the
+// SbS intermediate handed to the LeiaSR weaver -- so those get the same two
+// levers as the interlaced and anaglyph modes. It is only ever bound when at
+// least one lever is off its default (see R_StereoGhostReduceActive), so the
+// untouched present path keeps its original pass count.
+#define GLSL_STEREO_GHOST_COMPOSITE_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	GLSL_STEREO_GHOST_REDUCE \
+	"void main(void) {\n" \
+		"gl_FragColor = vec4(ghost_reduce(texture2D(tex, gl_TexCoord[0].st).rgb), 1.0);\n" \
 	"}\0"
 
 //

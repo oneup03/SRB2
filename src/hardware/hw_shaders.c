@@ -66,6 +66,9 @@ static struct {
 	// Anaglyph Dubois composite (SbS source → optimized red/cyan anaglyph)
 	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_ANAGLYPH_DUBOIS_COMPOSITE_FRAGMENT_SHADER},
 
+	// SHADER_STEREO_GHOST_COMPOSITE
+	{GLSL_DEFAULT_VERTEX_SHADER, GLSL_STEREO_GHOST_COMPOSITE_FRAGMENT_SHADER},
+
 	{NULL, NULL},
 };
 
@@ -448,6 +451,15 @@ customshaderxlat_t shaderxlat[] =
 	{"PalettePostprocess", SHADER_PALETTE_POSTPROCESS},
 	{"UIColormapFade", SHADER_UI_COLORMAP_FADE},
 	{"UITintedWipe", SHADER_UI_TINTED_WIPE},
+	// The stereo composite targets are listed so this table stays the same
+	// length as NUMSHADERTARGETS -- HWR_CompileShaders indexes it by shader
+	// target to name a failing shader, and would otherwise walk off the end
+	// (handing a NULL to %s) for anything past UITintedWipe.
+	{"RowInterlacedComposite", SHADER_ROW_INTERLACED_COMPOSITE},
+	{"ColumnInterlacedComposite", SHADER_COLUMN_INTERLACED_COMPOSITE},
+	{"CheckerboardComposite", SHADER_CHECKERBOARD_COMPOSITE},
+	{"AnaglyphDuboisComposite", SHADER_ANAGLYPH_DUBOIS_COMPOSITE},
+	{"StereoGhostComposite", SHADER_STEREO_GHOST_COMPOSITE},
 	{NULL, 0},
 };
 

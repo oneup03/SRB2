@@ -625,6 +625,10 @@ typedef enum
 	// misc.
 	gluniform_leveltime,
 
+	// stereo ghost/crosstalk reduction (composite shaders only)
+	gluniform_stereo_ghost_contrast,
+	gluniform_stereo_ghost_lift,
+
 	gluniform_max,
 } gluniform_t;
 
@@ -652,6 +656,11 @@ static gl_shaderstate_t gl_shaderstate;
 
 // Shader info
 static float shader_leveltime = 0;
+// Ghost/crosstalk reduction, pushed in by HWR_DrawStereoComposite right
+// before the composite draw. Defaults are the exact no-op values, so a
+// composite shader that never receives them still behaves identically.
+static float shader_stereo_ghost_contrast = 1.0f;
+static float shader_stereo_ghost_lift = 0.0f;
 
 // Lactozilla: Shader functions
 static boolean Shader_CompileProgram(gl_shader_t *shader, GLint i);
@@ -793,6 +802,13 @@ EXPORT void HWRAPI(SetShaderInfo) (hwdshaderinfo_t info, INT32 value)
 		case HWD_SHADERINFO_LEVELTIME:
 			shader_leveltime = (((float)(value-1)) + FIXED_TO_FLOAT(rendertimefrac)) / TICRATE;
 			break;
+		// Both arrive scaled by 1000 (this entry point only carries an INT32).
+		case HWD_SHADERINFO_STEREO_GHOST_CONTRAST:
+			shader_stereo_ghost_contrast = (float)value / 1000.0f;
+			break;
+		case HWD_SHADERINFO_STEREO_GHOST_LIFT:
+			shader_stereo_ghost_lift = (float)value / 1000.0f;
+			break;
 		default:
 			break;
 	}
@@ -898,56 +914,74 @@ static void GLPerspective(GLfloat fovy, GLfloat aspect)
 	pglMultMatrixf(&m[0][0]);
 }
 
-// Off-axis stereo perspective — direct port of the OpenVR-style reference:
-//   horFov   = tan(fov/2)               (input fov is HORIZONTAL, in degrees)
-//   verFov   = horFov / aspect          (vertical derived from aspect ratio)
-//   eyeOffset = ±(sep/2) / conv         (per-eye lateral frustum shift in tan-space)
-//   bounds (tan-space, then * zNear for glFrustum form):
-//     left   = -horFov + eyeOffset
-//     right  =  horFov + eyeOffset
-//     bottom = -verFov
-//     top    =  verFov
-// The eye translate (post-frustum -iod/2 in X) is what gives stereo its
-// depth-dependent parallax — without it, all objects share the same constant
-// disparity (shear stereo). Skybox passes set skip_eye_translate=true so the
-// sky receives only the constant frustum shift = max-IPD parallax = "infinity".
-//   iod < 0 : left eye   (eyeOffset = +iod/(2*focal) effectively)
-//   iod > 0 : right eye  (eyeOffset = -iod/(2*focal) effectively)
-static void GLPerspectiveStereo(GLfloat fovy, GLfloat aspect, GLfloat iod, GLfloat focal, boolean skip_eye_translate)
+// Off-axis stereo perspective, parameterized in CLIP SPACE.
+//
+// `separation` is the signed per-eye shear and goes into the projection's
+// [2][0] slot unchanged -- no convergence factor, no FoV factor. Its
+// magnitude is the total at-infinity disparity as a fraction of the screen
+// width, which is why it can be a plain user setting: it means the same thing
+// at every FoV and on every display. (r_stereo.c R_GetStereoSeparation owns
+// the sign convention; +1 is the left eye for this matrix layout.)
+//
+// The eye translation is what used to be the knob and is now derived. Holding
+// zero parallax at `convergence` while `separation` stays fixed requires a
+// baseline that tracks both the convergence distance and the live FoV:
+//
+//     eye_baseline = 2 * separation * tan(fov/2) * convergence   (total)
+//
+// so each eye sits half that off-axis. Do not cache this as a physical IPD --
+// it legitimately changes whenever either input changes.
+//
+// The bounds fed to the glFrustum form are therefore symmetric (no eyeOffset
+// term); the asymmetry is introduced afterwards by overwriting m[2][0].
+//
+//   horFov   = tan(fov/2)          (input fov is HORIZONTAL, in degrees)
+//   verFov   = horFov / aspect     (vertical derived from aspect ratio)
+//   m[2][0]  = separation          (THE shear -- convergence-invariant)
+//
+// Skybox passes set skip_eye_translate = true, which leaves the shear acting
+// alone. That is exactly the z -> infinity limit of the per-eye disparity, so
+// the sky lands at the background-disparity ceiling regardless of how large
+// the dome's actual radius is, and it no longer fights the user's settings.
+static void GLPerspectiveStereo(GLfloat fovy, GLfloat aspect, GLfloat separation, GLfloat convergence, boolean skip_eye_translate)
 {
 	const GLfloat zNear = NEAR_CLIPPING_PLANE;
 	const GLfloat zFar = FAR_CLIPPING_PLANE;
 	const GLfloat radians = (GLfloat)(fovy / 2.0f * M_PIl / 180.0f);
 	const GLfloat horFov = (GLfloat)tan((double)radians);                  // tan(fov/2)
 	const GLfloat verFov = horFov / aspect;
-	const GLfloat eyeOffset = -iod * 0.5f / focal;                          // tan-space; sign matches my iod convention (iod>0 = right eye)
 	const GLfloat deltaZ = zFar - zNear;
 	GLfloat top, bottom, left, right;
 
-	if ((fabsf((float)deltaZ) < 1.0E-36f) || fpclassify(horFov) == FP_ZERO || fpclassify(aspect) == FP_ZERO || focal <= 0.0f)
+	if ((fabsf((float)deltaZ) < 1.0E-36f) || fpclassify(horFov) == FP_ZERO || fpclassify(aspect) == FP_ZERO || convergence <= 0.0f)
 	{
 		GLPerspective(fovy, aspect);
 		return;
 	}
 
-	// Bounds in world-space at the near plane (tan-space × zNear).
+	// Symmetric bounds in world-space at the near plane (tan-space * zNear).
 	top    =  zNear * verFov;
 	bottom = -top;
-	right  = zNear * ( horFov + eyeOffset);
-	left   = zNear * (-horFov + eyeOffset);
+	right  =  zNear * horFov;
+	left   = -right;
 
 	{
 		GLfloat m[4][4] = {
 			{ (2.0f*zNear)/(right-left),         0.0f,                                0.0f,                                  0.0f},
 			{ 0.0f,                              (2.0f*zNear)/(top-bottom),           0.0f,                                  0.0f},
-			{ (right+left)/(right-left),         (top+bottom)/(top-bottom),           -(zFar+zNear)/deltaZ,                 -1.0f},
+			{ separation,                        (top+bottom)/(top-bottom),           -(zFar+zNear)/deltaZ,                 -1.0f},
 			{ 0.0f,                              0.0f,                                -(2.0f*zFar*zNear)/deltaZ,             0.0f},
 		};
 		pglMultMatrixf(&m[0][0]);
 	}
 
 	if (!skip_eye_translate)
-		pglTranslatef(-iod * 0.5f, 0.0f, 0.0f);
+	{
+		// Derived baseline (see above). separation is signed per eye, so the
+		// sign of the translation follows from it directly.
+		const GLfloat half_baseline = separation * horFov * convergence;
+		pglTranslatef(half_baseline, 0.0f, 0.0f);
+	}
 }
 
 static void GLProject(GLfloat objX, GLfloat objY, GLfloat objZ,
@@ -1837,6 +1871,9 @@ static void Shader_SetUniforms(FSurfaceInfo *Surface, GLRGBAFloat *poly, GLRGBAF
 
 		UNIFORM_1(shader->uniforms[gluniform_leveltime], shader_leveltime, pglUniform1f);
 
+		UNIFORM_1(shader->uniforms[gluniform_stereo_ghost_contrast], shader_stereo_ghost_contrast, pglUniform1f);
+		UNIFORM_1(shader->uniforms[gluniform_stereo_ghost_lift], shader_stereo_ghost_lift, pglUniform1f);
+
 		#undef UNIFORM_1
 		#undef UNIFORM_2
 		#undef UNIFORM_3
@@ -1962,6 +1999,10 @@ static boolean Shader_CompileProgram(gl_shader_t *shader, GLint i)
 
 	// misc.
 	shader->uniforms[gluniform_leveltime] = GETUNI("leveltime");
+
+	// stereo ghost/crosstalk reduction
+	shader->uniforms[gluniform_stereo_ghost_contrast] = GETUNI("stereo_ghost_contrast");
+	shader->uniforms[gluniform_stereo_ghost_lift] = GETUNI("stereo_ghost_lift");
 #undef GETUNI
 
 	// set permanent uniform values
@@ -2821,8 +2862,8 @@ EXPORT void HWRAPI(SetTransform) (FTransform *stransform)
 	boolean shearing = false;
 	float used_fov;
 	SINT8 stereo_eye = 0;
-	float stereo_iod = 0.0f;
-	float stereo_focal = 1.0f;
+	float stereo_separation = 0.0f;
+	float stereo_convergence = 1.0f;
 	boolean stereo_skybox = false;
 
 	pglLoadIdentity();
@@ -2846,8 +2887,8 @@ EXPORT void HWRAPI(SetTransform) (FTransform *stransform)
 		special_splitscreen = stransform->splitscreen;
 		shearing = stransform->shearing;
 		stereo_eye = stransform->eyeOffset;
-		stereo_iod = stransform->iod;
-		stereo_focal = stransform->focalLength;
+		stereo_separation = stransform->separation;
+		stereo_convergence = stransform->convergence;
 		stereo_skybox = stransform->skyboxPass;
 	}
 	else
@@ -2877,6 +2918,12 @@ EXPORT void HWRAPI(SetTransform) (FTransform *stransform)
 		// halved viewport. The off-axis frustum then operates over the
 		// composed FOV, producing correct per-eye geometry within each
 		// player's half.
+		//
+		// Under clip space the fudge no longer leaks into the depth effect:
+		// the shear is FoV-invariant, so splitscreen and full-screen views
+		// share the same background disparity. Only the derived eye baseline
+		// tracks the fudged FoV, which is what keeps convergence landing on
+		// the screen plane in both.
 		float fov_used = used_fov;
 		float aspect   = ASPECT_RATIO;
 		if (special_splitscreen)
@@ -2884,7 +2931,7 @@ EXPORT void HWRAPI(SetTransform) (FTransform *stransform)
 			fov_used = (float)(atan(tan(fov_used*M_PI/360)*0.8)*360/M_PI);
 			aspect   = 2*ASPECT_RATIO;
 		}
-		GLPerspectiveStereo(fov_used, aspect, stereo_iod, stereo_focal, stereo_skybox);
+		GLPerspectiveStereo(fov_used, aspect, stereo_separation, stereo_convergence, stereo_skybox);
 	}
 	else if (special_splitscreen)
 	{
@@ -3776,6 +3823,14 @@ EXPORT void HWRAPI(DrawInterlacedComposite)(int tex, INT32 width, INT32 height)
 	pglPopMatrix();
 	pglMatrixMode(GL_MODELVIEW);
 	pglPopMatrix();
+
+	// Leave the scissor as we found it (ResetStereoMode disables it before
+	// any of the present paths run). It matters for the LeiaSR path, which
+	// composites at the engine's render size and only afterwards widens the
+	// viewport to the SDL window for the weave -- a scissor left clamped to
+	// the smaller render rect would crop the woven output to a corner of the
+	// panel, the same failure the GClipRect note below documents.
+	pglDisable(GL_SCISSOR_TEST);
 }
 
 #endif //HWRENDER

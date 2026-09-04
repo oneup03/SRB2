@@ -5143,10 +5143,12 @@ static void HWR_DrawSkyBackground(player_t *player)
 		dometransform.y      = 0.0;
 		dometransform.z      = 0.0;
 
-		// Force the sky to render at "infinity" depth in stereo: collapsing
-		// the convergence plane via skyboxPass makes parallax = full IPD for
-		// any sky distance, so the sky appears at maximum depth and doesn't
-		// fight the user's IPD/focal settings.
+		// Force the sky to render at "infinity" depth in stereo. skyboxPass
+		// drops the per-eye view translation and leaves the clip-space shear
+		// acting alone, which is exactly the z -> infinity limit of the
+		// disparity: the sky lands at the background-disparity ceiling
+		// (separation x screen width) no matter what radius the dome happens
+		// to use, instead of fighting the user's settings.
 		dometransform.skyboxPass = true;
 
 		//04/01/2000: Hurdler: added for T&L
@@ -5398,8 +5400,8 @@ static void HWR_SetupView(player_t *player, INT32 viewnumber, float fpov, boolea
 	atransform.splitscreen = splitscreen;
 
 	atransform.eyeOffset   = R_GetCurrentEye();
-	atransform.iod         = R_GetStereoIOD();
-	atransform.focalLength = R_GetStereoFocal();
+	atransform.separation  = R_GetStereoSeparation();
+	atransform.convergence = R_GetStereoConvergence();
 	atransform.skyboxPass  = skybox;
 
 	gl_fovlud = (float)(1.0l/tan((double)(fpov*M_PIl/360l)));
@@ -6249,6 +6251,16 @@ void HWR_SetPresentViewport(INT32 width, INT32 height)
 // to the user's display mode.
 void HWR_DrawStereoComposite(INT32 shader_target, INT32 width, INT32 height)
 {
+	// Ghost/crosstalk reduction rides along with every composite. Pushed
+	// here rather than in the render path because this is the last thing
+	// that touches the image before it reaches the display (or the LeiaSR
+	// weaver), which is where the range compression has to happen. Scaled
+	// by 1000 because SetShaderInfo only carries an INT32.
+	HWD.pfnSetShaderInfo(HWD_SHADERINFO_STEREO_GHOST_CONTRAST,
+		(INT32)(R_GetStereoGhostContrast() * 1000.0f));
+	HWD.pfnSetShaderInfo(HWD_SHADERINFO_STEREO_GHOST_LIFT,
+		(INT32)(R_GetStereoGhostLift() * 1000.0f));
+
 	HWD.pfnSetShader(HWR_GetShaderFromTarget(shader_target));
 	HWD.pfnDrawInterlacedComposite(HWD_SCREENTEXTURE_LEIA, width, height);
 	HWD.pfnUnSetShader();

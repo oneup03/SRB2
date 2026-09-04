@@ -35,11 +35,14 @@ typedef enum
 #define STEREO_EYE_RIGHT  (+1)
 
 extern consvar_t cv_stereomode;
-extern consvar_t cv_stereoipd;
-extern consvar_t cv_stereofoclen;
+extern consvar_t cv_stereosep;              // clip-space separation (see R_GetStereoSeparation)
+extern consvar_t cv_stereofoclen;           // convergence plane, world units
 extern consvar_t cv_stereoswap;
 extern consvar_t cv_stereohuddepth;
 extern consvar_t cv_stereocrosshairdepth;
+extern consvar_t cv_stereoghostcontrast;    // ghost/crosstalk reduction: contrast squeeze
+extern consvar_t cv_stereoghostlift;        // ghost/crosstalk reduction: black floor lift
+extern consvar_t cv_stereoipd;              // legacy pre-clip-space knob, kept for one-shot migration
 
 // Register all stereo CVARs with the console. Call from R_RegisterEngineStuff.
 void R_RegisterStereoVars(void);
@@ -68,8 +71,42 @@ void R_EndStereoEye(void);
 SINT8  R_GetCurrentEye(void);                  // -1, 0, +1 — perspective eye
                                               // (HUD/crosshair shifts and the off-axis
                                               // frustum follow this; honors "Swap Eyes")
-float R_GetStereoIOD(void);                   // signed eye separation for current eye
-float R_GetStereoFocal(void);                 // convergence-plane distance
+
+// Signed clip-space separation for the current eye.
+//
+// This is THE stereo knob: the projection's [2][0] shear term is set to it
+// directly, with no convergence and no FoV factor. Its magnitude is the
+// total background (at-infinity) disparity as a fraction of the screen
+// width, so 0.05 puts objects at infinity 5% of the screen apart. The
+// divergence ceiling is IPD / screen_width (~0.105 on a 27" 16:9 panel) --
+// past that the eyes must turn outward and the image cannot be fused.
+//
+// Sign convention, verified against this renderer's frustum rather than
+// assumed: LEFT eye is positive, RIGHT eye is negative. GLPerspectiveStereo
+// writes the shear into m[2][0] of a glFrustum-form matrix, and NDC x picks
+// up -m[2][0], so a positive shear moves that eye's image left. See
+// R_StereoEyeShearDir.
+float R_GetStereoSeparation(void);
+
+// Convergence-plane distance in world units -- the depth that lands exactly
+// on the screen plane (zero disparity). Under the clip-space parameterization
+// this ONLY moves the screen plane; it no longer scales background depth the
+// way the old iod/focal form did.
+float R_GetStereoConvergence(void);
+
+// Per-eye sign of the projection shear: +1 left, -1 right, 0 mono. Exposed
+// so the HUD/crosshair pixel-shift path shares the frustum's convention
+// instead of carrying an independently-guessed one.
+SINT8 R_StereoEyeShearDir(SINT8 perspective_eye);
+
+// Ghost / crosstalk reduction, applied at composite time by the stereo
+// present path. Contrast is a multiplier around mid-grey in linear light
+// (1.0 = off); lift raises the black floor (0.0 = off). Both are exact
+// no-ops at their defaults; R_StereoGhostReduceActive() reports whether
+// either is engaged so the present path can skip the extra pass.
+float   R_GetStereoGhostContrast(void);
+float   R_GetStereoGhostLift(void);
+boolean R_StereoGhostReduceActive(void);
 
 // Placement eye for the active pass — the original sign passed to
 // R_BeginStereoEye, before "Swap Eyes" inverts the perspective. Use this

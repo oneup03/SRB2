@@ -118,12 +118,14 @@ typedef struct
 	boolean     shearing;        // 14042019
 	float       viewaiming;      // 17052019
 	// Stereoscopic 3D state. eyeOffset is -1/0/+1 (left/mono/right).
-	// When eyeOffset != 0 the renderer builds an off-axis frustum using
-	// iod (signed eye separation) and focalLength (convergence plane).
-	// skyboxPass collapses the focal plane to push sky to "infinity" disparity.
+	// When eyeOffset != 0 the renderer builds an off-axis frustum from
+	// separation (the SIGNED clip-space shear -- see R_GetStereoSeparation)
+	// and convergence (the world depth that lands on the screen plane).
+	// skyboxPass drops the eye translation so sky geometry receives the
+	// shear alone, which is exactly the at-infinity disparity limit.
 	SINT8       eyeOffset;
-	float       iod;
-	float       focalLength;
+	float       separation;
+	float       convergence;
 	boolean     skyboxPass;
 } FTransform;
 
@@ -158,6 +160,7 @@ enum
 	SHADER_COLUMN_INTERLACED_COMPOSITE,
 	SHADER_CHECKERBOARD_COMPOSITE,
 	SHADER_ANAGLYPH_DUBOIS_COMPOSITE,
+	SHADER_STEREO_GHOST_COMPOSITE,
 
 	NUMSHADERTARGETS
 };
@@ -322,6 +325,11 @@ typedef enum hwdshaderstage hwdshaderstage_t;
 enum hwdshaderinfo
 {
 	HWD_SHADERINFO_LEVELTIME = 1,
+	// Ghost / crosstalk reduction for the stereo composite shaders. Both
+	// values arrive scaled by 1000 because this entry point only carries an
+	// INT32: contrast 1000 == 1.0 == off, lift 0 == off.
+	HWD_SHADERINFO_STEREO_GHOST_CONTRAST,
+	HWD_SHADERINFO_STEREO_GHOST_LIFT,
 };
 
 typedef enum hwdshaderinfo hwdshaderinfo_t;

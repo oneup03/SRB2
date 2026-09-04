@@ -101,6 +101,9 @@ void HWR_ResetStereoMode(void);
 //   SHADER_COLUMN_INTERLACED_COMPOSITE  — SbS source → column-interleaved
 //   SHADER_CHECKERBOARD_COMPOSITE       — SbS source → checkerboard
 //   SHADER_ANAGLYPH_DUBOIS_COMPOSITE    — SbS source → red/cyan Dubois anaglyph
+//   SHADER_STEREO_GHOST_COMPOSITE       — 1:1 passthrough, ghost reduction only
+// Every one of them also applies the ghost/crosstalk reduction levers, which
+// this function pushes to the driver before binding the shader.
 void HWR_DrawStereoComposite(INT32 shader_target, INT32 width, INT32 height);
 
 // This stuff is put here so models can use them

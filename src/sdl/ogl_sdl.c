@@ -217,6 +217,16 @@ void OglSdlFinishUpdate(boolean waitvbl)
 		}
 	}
 
+	// Modes with no composite step of their own (plain SbS and TaB) still
+	// want the ghost/crosstalk reduction, so give them the passthrough
+	// composite whenever a lever is off its default. Costs an extra capture
+	// plus fullscreen quad, which is why it is skipped entirely otherwise.
+	if (composite_shader < 0 && R_StereoActive()
+		&& R_StereoMode() != STEREO_LEIASR && R_StereoGhostReduceActive())
+	{
+		composite_shader = SHADER_STEREO_GHOST_COMPOSITE;
+	}
+
 	if (composite_shader >= 0)
 	{
 		HWR_MakeScreenFinalTexture();
@@ -254,6 +264,21 @@ void OglSdlFinishUpdate(boolean waitvbl)
 		R_LeiaSR_Init(I_GetWindowHandle()); // lazy init
 		if (R_LeiaSR_Available())
 		{
+			// Ghost reduction has to happen to the SbS intermediate BEFORE
+			// the weave, not after: the weaver's own anti-crosstalk pass
+			// pre-subtracts a fraction of the opposite eye, and the residual
+			// ghosting people see on high-contrast content is that
+			// correction clipping at the bottom of the range rather than
+			// the correction being absent. Compressing first is what gives
+			// it room. Draw the reduced image back over the (engine-sized)
+			// backbuffer and recapture, so the weaver's input is unchanged
+			// in every way except the range.
+			if (R_StereoGhostReduceActive())
+			{
+				HWR_MakeScreenLeiaTexture();
+				HWR_DrawStereoComposite(SHADER_STEREO_GHOST_COMPOSITE, vid.width, vid.height);
+			}
+
 			HWR_MakeScreenLeiaTexture();
 			HWR_SetPresentViewport(sdlw, sdlh);
 			{
